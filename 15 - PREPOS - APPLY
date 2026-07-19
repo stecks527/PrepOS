@@ -1,0 +1,870 @@
+/*************************************************
+ * 15 - PREPOS - APPLY
+ * Version: 3.0.0
+ * Status: ACTIVE
+ *
+ * Canonical PrepOS apply pipeline.
+ *
+ * Responsibilities:
+ * - Validate the browser payload
+ * - Write basic IN/OUT state
+ * - Write assignments
+ * - Write cast changes
+ * - Update the Performance Report
+ * - Queue snapshots
+ * - Refresh Insert when permitted by ShowRulesOS
+ *
+ * Downstream implementations remain in their
+ * dedicated writer files.
+ *************************************************/
+
+
+/* =========================================================
+ * PUBLIC APPLY ENTRYPOINT
+ * ========================================================= */
+
+function applyInOutPrepFromDialog(payload) {
+  const startedAt = Date.now();
+
+  const result = {
+    success: true,
+    message: "",
+    steps: [],
+    errors: [],
+    nextData: {}
+  };
+
+  payload =
+    normalizePrepApplyPayload_(
+      payload
+    );
+
+  validatePrepApplyPayload_(
+    payload
+  );
+
+  const ss =
+    SpreadsheetApp
+      .getActiveSpreadsheet();
+
+  const inOut =
+    ss.getSheetByName(
+      "IN/OUT"
+    );
+
+  if (!inOut) {
+    throw new Error(
+      'Could not find "IN/OUT" tab.'
+    );
+  }
+
+  runPrepApplyStep_(
+    result,
+    "Basic IN/OUT State",
+    function () {
+      writePrepBasicInOutState_(
+        inOut,
+        payload
+      );
+    }
+  );
+
+  runPrepApplyStep_(
+    result,
+    "Assignments",
+    function () {
+      writeShowAssignmentsFromPayload_(
+        payload
+      );
+    }
+  );
+
+  runPrepApplyStep_(
+    result,
+    "Guest Speller Cache",
+    function () {
+      if (
+        typeof saveGuestSpellerCache_ ===
+        "function"
+      ) {
+        saveGuestSpellerCache_(
+          payload
+        );
+      }
+    }
+  );
+
+  runPrepApplyStep_(
+    result,
+    "IN/OUT Cast Changes",
+    function () {
+      writeInOutChangesFromDialog_(
+        inOut,
+        payload
+      );
+    }
+  );
+
+  runPrepApplyStep_(
+    result,
+    "Performance Report IN/OUT",
+    function () {
+      writeInOutChangesToPerformanceReportFromPayload_(
+        payload
+      );
+    }
+  );
+
+  runPrepApplyStep_(
+    result,
+    "Performance Report Guest Speller",
+    function () {
+      writeGuestSpellerToPerformanceReportFromPayload_(
+        payload
+      );
+    }
+  );
+
+  runPrepApplyStep_(
+    result,
+    "Performance Report Notes",
+    function () {
+      writeReportNotesFromPayload_(
+        payload
+      );
+    }
+  );
+
+  runPrepApplyStep_(
+    result,
+    "Operational Flush",
+    function () {
+      SpreadsheetApp.flush();
+    }
+  );
+
+  runPrepApplyStep_(
+    result,
+    "Assignment History",
+    function () {
+      if (
+        typeof EngineAssignmentHistoryOS ===
+        "function"
+      ) {
+        EngineAssignmentHistoryOS()
+          .recordFromPrep(
+            payload
+          );
+      }
+    }
+  );
+
+  runPrepApplyStep_(
+    result,
+    "Snapshot Queue",
+    function () {
+      if (
+        typeof queueSnapshotOSv2FromPrep ===
+        "function"
+      ) {
+        queueSnapshotOSv2FromPrep(
+          payload
+        );
+      }
+    }
+  );
+
+  const prepOptions =
+    getPrepApplyOptions_(
+      payload
+    );
+
+  if (
+    prepOptions.refreshInsert
+  ) {
+    runPrepApplyStep_(
+      result,
+      "Insert Refresh",
+      function () {
+        if (
+          typeof updateInsertFromInOut !==
+          "function"
+        ) {
+          throw new Error(
+            "updateInsertFromInOut() is unavailable."
+          );
+        }
+
+        updateInsertFromInOut();
+      }
+    );
+  } else {
+    result.steps.push({
+      label: "Insert Refresh",
+      ok: true,
+      skipped: true,
+      durationMs: 0
+    });
+
+    Logger.log(
+      "PrepOS Insert refresh skipped by ShowRulesOS."
+    );
+  }
+
+  result.success =
+    result.errors.length === 0;
+
+  result.message =
+    buildPrepApplyResultMessage_(
+      result,
+      prepOptions
+    );
+
+  result.nextData = {
+    date:
+      inOut
+        .getRange("A3")
+        .getDisplayValue(),
+
+    performance:
+      payload.performance || "",
+
+    guestSpellerName:
+      payload.guestSpellerName || "",
+
+    guestDateTimeText:
+      payload.guestDateTimeText || "",
+
+    guestSpellerNote:
+      payload.guestSpellerNote || ""
+  };
+
+  result.durationMs =
+    Date.now() - startedAt;
+
+  Logger.log(
+    "PREPOS APPLY RESULT"
+  );
+
+  Logger.log(
+    JSON.stringify(
+      result,
+      null,
+      2
+    )
+  );
+
+  if (!result.success) {
+    throw new Error(
+      "PrepOS apply completed with errors:\n" +
+      result.errors.join("\n")
+    );
+  }
+
+  return result;
+}
+
+
+/* =========================================================
+ * BASIC IN/OUT STATE
+ * ========================================================= */
+
+function writePrepBasicInOutState_(
+  inOut,
+  payload
+) {
+  /*
+   * Canonical Prep-controlled cells:
+   *
+   * A4  — selected performance
+   * A24 — conductor
+   * A26 — general notes
+   */
+  inOut
+    .getRange("A4")
+    .setValue(
+      payload.performance || ""
+    );
+
+  inOut
+    .getRange("A24")
+    .setValue(
+      payload.conductor || ""
+    );
+
+  inOut
+    .getRange("A26")
+    .setValue(
+      payload.notes || ""
+    );
+}
+
+
+/* =========================================================
+ * PAYLOAD NORMALIZATION
+ * ========================================================= */
+
+function normalizePrepApplyPayload_(
+  payload
+) {
+  payload =
+    payload || {};
+
+  const assignments =
+    payload.assignments || {};
+
+  const normalizedCastOuts =
+    (payload.castOuts || [])
+      .map(function (item) {
+        item =
+          item || {};
+
+        const reason =
+          prepOSClean_(
+            item.reason
+          );
+
+        const isContractLeave =
+          typeof prepOSIsContractLeaveReason_ ===
+            "function"
+            ? prepOSIsContractLeaveReason_(
+                reason
+              )
+            : /^(LOA|MLOA)$/i.test(
+                reason
+              );
+
+        return {
+          out:
+            prepOSFirstNonBlank_(
+              item.out,
+              item.actor,
+              item.actorOut
+            ),
+
+          in:
+            prepOSFirstNonBlank_(
+              item.in,
+              item.finalInActor,
+              item.inActor,
+              item.coverActor
+            ),
+
+          role:
+            prepOSFirstNonBlank_(
+              item.role,
+              item.character
+            ),
+
+          reason:
+            reason,
+
+          noCoverNeeded:
+            Boolean(
+              item.noCoverNeeded
+            ),
+
+          isContractLOA:
+            isContractLeave,
+
+          writeToInOutSheet:
+            item.writeToInOutSheet !== false &&
+            !isContractLeave
+        };
+      })
+      .filter(function (item) {
+        return (
+          item.out ||
+          item.in ||
+          item.role ||
+          item.reason
+        );
+      });
+
+  return {
+    performance:
+      prepOSClean_(
+        payload.performance
+      ),
+
+    conductor:
+      prepOSClean_(
+        payload.conductor
+      ),
+
+    notes:
+      prepOSCleanMultiline_(
+        payload.notes
+      ),
+
+    castOuts:
+      normalizedCastOuts,
+
+    assignments: {
+      groups:
+        assignments.groups || [],
+
+      tracks:
+        assignments.tracks || [],
+
+      values:
+        assignments.values || {},
+
+      dropdowns:
+        assignments.dropdowns || {},
+
+      officeShow:
+        Boolean(
+          assignments.officeShow
+        ),
+
+      training:
+        assignments.training || {
+          stageManagement: {
+            enabled: false
+          },
+          audio: {
+            enabled: false
+          }
+        }
+    },
+
+    guestSpellerName:
+      prepOSClean_(
+        payload.guestSpellerName
+      ),
+
+    guestDateTimeText:
+      prepOSClean_(
+        payload.guestDateTimeText
+      ),
+
+    guestSpellerNote:
+      prepOSCleanMultiline_(
+        payload.guestSpellerNote
+      )
+  };
+}
+
+/* =========================================================
+ * CONTRACT-LEAVE RULE
+ *
+ * Canonical owner for determining whether an OUT reason
+ * represents contract leave.
+ * ========================================================= */
+
+function prepOSIsContractLeaveReason_(
+  reason
+) {
+  const text =
+    String(
+      reason || ""
+    )
+      .trim()
+      .toUpperCase();
+
+  return (
+    text === "LOA" ||
+    text === "MLOA"
+  );
+}
+
+
+/* =========================================================
+ * VALIDATION
+ * ========================================================= */
+
+function validatePrepApplyPayload_(
+  payload
+) {
+  if (
+    !payload ||
+    typeof payload !==
+      "object"
+  ) {
+    throw new Error(
+      "PrepOS apply payload is missing."
+    );
+  }
+
+  if (
+    !payload.performance
+  ) {
+    throw new Error(
+      "PrepOS requires a selected performance."
+    );
+  }
+
+  const assignments =
+    payload.assignments || {};
+
+  if (
+    !assignments.values ||
+    typeof assignments.values !==
+      "object"
+  ) {
+    throw new Error(
+      "PrepOS assignment values are missing."
+    );
+  }
+
+  (payload.castOuts || [])
+    .forEach(function (item, index) {
+      if (!item.out) {
+        throw new Error(
+          "Cast change #" +
+          (index + 1) +
+          " is missing the OUT actor."
+        );
+      }
+
+      if (
+        !item.noCoverNeeded &&
+        !item.isContractLOA &&
+        !item.in
+      ) {
+        throw new Error(
+          item.out +
+          " is missing a cover."
+        );
+      }
+    });
+
+  return true;
+}
+
+
+/* =========================================================
+ * APPLY OPTIONS
+ * ========================================================= */
+
+function getPrepApplyOptions_(
+  payload
+) {
+  if (
+    typeof ShowRulesOS ===
+    "function"
+  ) {
+    const options =
+      ShowRulesOS()
+        .getPrepOptions(
+          payload
+        );
+
+    if (options) {
+      return {
+        refreshInsert:
+          options.refreshInsert !== false,
+
+        captureSnapshotsNow:
+          Boolean(
+            options.captureSnapshotsNow
+          ),
+
+        queueSnapshots:
+          options.queueSnapshots !== false
+      };
+    }
+  }
+
+  return {
+    refreshInsert: true,
+    captureSnapshotsNow: false,
+    queueSnapshots: true
+  };
+}
+
+
+/* =========================================================
+ * SAFE STEP RUNNER
+ * ========================================================= */
+
+function runPrepApplyStep_(
+  result,
+  label,
+  callback
+) {
+  const startedAt =
+    Date.now();
+
+  try {
+    callback();
+
+    const step = {
+      label: label,
+      ok: true,
+      skipped: false,
+      durationMs:
+        Date.now() - startedAt
+    };
+
+    result.steps.push(
+      step
+    );
+
+    Logger.log(
+      label +
+      ": " +
+      step.durationMs +
+      "ms"
+    );
+
+    return step;
+
+  } catch (err) {
+    const message =
+      String(
+        err &&
+        err.message
+          ? err.message
+          : err
+      );
+
+    const step = {
+      label: label,
+      ok: false,
+      skipped: false,
+      durationMs:
+        Date.now() - startedAt,
+      error: message
+    };
+
+    result.steps.push(
+      step
+    );
+
+    result.errors.push(
+      label +
+      ": " +
+      message
+    );
+
+    Logger.log(
+      "PrepOS apply step failed | " +
+      label +
+      " | " +
+      message
+    );
+
+    if (
+      typeof EngineRouterOS ===
+      "function"
+    ) {
+      try {
+        EngineRouterOS().error(
+          "PrepOS",
+          label,
+          message,
+          {}
+        );
+      } catch (loggingError) {
+        Logger.log(
+          "PrepOS Engine logging skipped: " +
+          String(loggingError)
+        );
+      }
+    }
+
+    return step;
+  }
+}
+
+
+/* =========================================================
+ * RESULT MESSAGE
+ * ========================================================= */
+
+function buildPrepApplyResultMessage_(
+  result,
+  prepOptions
+) {
+  if (
+    result.errors.length
+  ) {
+    return (
+      "Prep completed with " +
+      result.errors.length +
+      " error" +
+      (
+        result.errors.length === 1
+          ? ""
+          : "s"
+      ) +
+      "."
+    );
+  }
+
+  return prepOptions.refreshInsert
+    ? "IN/OUT updated. Insert refreshed."
+    : "IN/OUT updated. Insert skipped.";
+}
+
+
+/* =========================================================
+ * NON-DESTRUCTIVE TEST
+ * ========================================================= */
+
+function testPrepOSApplyPipeline() {
+  const requiredFunctions = [
+    "writeShowAssignmentsFromPayload_",
+    "writeInOutChangesFromDialog_",
+    "writeInOutChangesToPerformanceReportFromPayload_",
+    "writeGuestSpellerToPerformanceReportFromPayload_",
+    "writeReportNotesFromPayload_",
+    "queueSnapshotOSv2FromPrep"
+  ];
+
+  const availability =
+    requiredFunctions.map(
+      function (functionName) {
+        return {
+          name:
+            functionName,
+
+          available:
+            typeof this[
+              functionName
+            ] === "function"
+        };
+      },
+      this
+    );
+
+  const missing =
+    availability.filter(
+      function (item) {
+        return !item.available;
+      }
+    );
+
+  const sample =
+    normalizePrepApplyPayload_({
+      performance:
+        "PERFORMANCE #999 - 7:00 PM",
+
+      conductor:
+        "Test Conductor",
+
+      notes:
+        "- Test note",
+
+      assignments: {
+        values: {
+          calling:
+            "Rachel A. Zucker",
+
+          deck:
+            "Chris Steckel",
+
+          conductor:
+            "Test Conductor",
+
+          audio:
+            "Corbin Lenard"
+        },
+
+        training: {
+          stageManagement: {
+            enabled: false
+          },
+
+          audio: {
+            enabled: false
+          }
+        }
+      },
+
+      castOuts: [
+        {
+          out:
+            "Test Principal",
+
+          in:
+            "Test Cover",
+
+          role:
+            "Olive",
+
+          reason:
+            "Illness"
+        },
+
+        {
+          out:
+            "Test Actor",
+
+          in:
+            "Temporary Replacement",
+
+          role:
+            "Leaf",
+
+          reason:
+            "MLOA"
+        }
+      ]
+    });
+
+  validatePrepApplyPayload_(
+    sample
+  );
+
+  const result = {
+    functionsChecked:
+      availability.length,
+
+    missing:
+      missing,
+
+    castOuts:
+      sample.castOuts.length,
+
+    writingToInOut:
+      sample.castOuts.filter(
+        function (item) {
+          return item.writeToInOutSheet;
+        }
+      ).length,
+
+    contractLeave:
+      sample.castOuts.filter(
+        function (item) {
+          return item.isContractLOA;
+        }
+      ).length
+  };
+
+  Logger.log(
+    "PREPOS APPLY PIPELINE TEST"
+  );
+
+  Logger.log(
+    JSON.stringify(
+      result,
+      null,
+      2
+    )
+  );
+
+  SpreadsheetApp
+    .getUi()
+    .alert(
+      "PrepOS apply pipeline test passed.\n\n" +
+      "Dependencies checked: " +
+      result.functionsChecked +
+      "\n" +
+      "Missing: " +
+      result.missing.length +
+      "\n" +
+      "Sample cast outs: " +
+      result.castOuts +
+      "\n" +
+      "Writing to IN/OUT: " +
+      result.writingToInOut +
+      "\n" +
+      "Contract leave: " +
+      result.contractLeave
+    );
+
+  return result;
+}

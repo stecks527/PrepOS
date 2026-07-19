@@ -1,0 +1,1136 @@
+<script>
+  let data = null;
+  let selectedIndex = 0;
+  let plannedOuts = [];
+  let callIns = [];
+  let assignments = {};
+  let performanceAssignments = {};
+  let currentPerformanceKey = "";
+  let selectedGuestInfo = {
+    name: "",
+    dateTimeText: "",
+    note: ""
+  };
+  let baseNotes = "";
+
+  document.addEventListener("DOMContentLoaded", loadPrepOS);
+
+  function loadPrepOS() {
+    document.getElementById("content").innerHTML =
+      '<div class="loading">Loading PrepOS state…</div>';
+
+    google.script.run
+      .withSuccessHandler(function (state) {
+        if (!state || state.ok === false) {
+          renderError(state);
+          return;
+        }
+
+        hydrateState(state);
+        renderPrepOS();
+      })
+      .withFailureHandler(function (err) {
+        renderError(err);
+      })
+      .prepOS_getState();
+  }
+
+  function hydrateState(state) {
+    data = state;
+    selectedIndex = Number(data.selectedIndex || 0);
+    plannedOuts = ((data.intelligence || {}).plannedOuts || [])
+      .map(normalizeClientOut_);
+    callIns = [];
+
+    performanceAssignments =
+      cloneClientObject_(
+        data.performanceAssignments || {}
+      );
+
+    assignments = data.assignments || {
+      tracks: [],
+      values: {},
+      dropdowns: { peopleByTrack: {} },
+      officeShow: false,
+      training: {}
+    };
+
+    assignments.values = assignments.values || {};
+    assignments.dropdowns = assignments.dropdowns || { peopleByTrack: {} };
+    assignments.training = assignments.training || {};
+
+    /*
+     * Office Show remains a boolean for compatibility with
+     * existing writers, snapshots, and PayrollOS.
+     *
+     * officeShowPerson stores the selected person.
+     */
+    if (
+      assignments.officeShow &&
+      typeof assignments.officeShow === "object"
+    ) {
+      assignments.officeShowPerson =
+        assignments.officeShow.person || "";
+
+      assignments.officeShow =
+        assignments.officeShow.enabled === true;
+    }
+
+    assignments.officeShow =
+      assignments.officeShow === true;
+
+    assignments.officeShowPerson =
+      assignments.officeShowPerson || "";
+
+
+    ["stageManagement", "audio"].forEach(function (groupId) {
+      assignments.training[groupId] =
+        assignments.training[groupId] || {
+          enabled: false,
+          trackId: "",
+          trainer: "",
+          trainee: "",
+          note: "",
+          mode: "Training"
+        };
+    });
+
+    baseNotes = data.notes || "";
+  }
+
+  function renderPrepOS() {
+    document.getElementById("content").innerHTML = `
+      <div class="dashboard">
+        <section class="section wide" id="performanceChoiceSection">
+          <h2>Select Performance</h2>
+          <div id="performanceButtons"></div>
+        </section>
+
+        <div class="assignment-panels">
+          ${renderStageManagement_()}
+          ${renderMusicAudio_()}
+        </div>
+
+        <section class="section wide">
+          <h2>Notes</h2>
+          <textarea id="notesInput"></textarea>
+        </section>
+
+        <section class="section wide">
+          <h2>Planned Outs</h2>
+          <div class="small" id="plannedOutsStatus"></div>
+          <div id="plannedOutsContainer"></div>
+        </section>
+
+        <section class="section wide">
+          <h2>Call-Ins</h2>
+          <div class="small">Add same-day changes not already listed above.</div>
+          <div id="callInsContainer" style="margin-top:12px;"></div>
+        </section>
+      </div>
+
+      <div class="applybar">
+        <div class="status" id="status"></div>
+        <button class="ghost" onclick="addCallInRow()">+ Add Call-In</button>
+        <button onclick="applyPrep()">Apply Prep</button>
+      </div>
+    `;
+
+    renderPerformanceButtons_();
+    selectPerformance_(Math.min(selectedIndex, (data.performances || []).length - 1));
+    renderAssignments_();
+    renderOuts_();
+  }
+
+  function renderStageManagement_() {
+    return `
+      <section class="section">
+        <h2>Stage Management</h2>
+
+        <div id="stageManagementAssignments"></div>
+
+        <div class="prep-expandable-control">
+          <div class="checkline prep-feature-toggle">
+            <input type="checkbox" id="stageManagementTrainingEnabled"
+              onchange="renderTraining_('stageManagement')">
+            <label for="stageManagementTrainingEnabled">TRAINING</label>
+          </div>
+          <div id="stageManagementTrainingContainer"
+            class="prep-expanded-panel"></div>
+        </div>
+
+        <div class="prep-expandable-control">
+          <div class="checkline prep-feature-toggle">
+            <input type="checkbox" id="officeShowEnabled"
+              onchange="toggleOfficeShow_()">
+            <label for="officeShowEnabled">OFFICE SHOW</label>
+          </div>
+          <div id="officeShowContainer"
+            class="prep-expanded-panel"></div>
+        </div>
+      </section>
+    `;
+  }
+
+  function renderMusicAudio_() {
+    return `
+      <section class="section">
+        <h2>Music / Audio</h2>
+        <div id="musicAssignments"></div>
+        <div id="audioAssignments"></div>
+
+        <div class="prep-expandable-control">
+          <div class="checkline prep-feature-toggle">
+            <input type="checkbox" id="audioTrainingEnabled"
+              onchange="renderTraining_('audio')">
+            <label for="audioTrainingEnabled">TRAINING</label>
+          </div>
+          <div id="audioTrainingContainer"
+            class="prep-expanded-panel"></div>
+        </div>
+      </section>
+    `;
+  }
+
+  function renderPerformanceButtons_() {
+    const box = document.getElementById("performanceButtons");
+    box.innerHTML = "";
+
+    (data.performances || []).forEach(function (perf, index) {
+      const button = document.createElement("button");
+      button.className =
+        "performance-button" +
+        (index === selectedIndex ? " selected" : "");
+
+      button.innerHTML =
+        "<strong>" + escapeHtml_(performanceType_(perf.inOutText)) + "</strong><br>" +
+        escapeHtml_(perf.inOutText || "") +
+        "<div class='small'>Conductor: " +
+        escapeHtml_(perf.conductor || "not found") +
+        "</div>";
+
+      button.onclick = function () {
+        selectPerformance_(index);
+      };
+
+      box.appendChild(button);
+    });
+
+    document.getElementById("performanceChoiceSection").style.display =
+      (data.performances || []).length <= 1 ? "none" : "block";
+  }
+
+  function selectPerformance_(index) {
+  /*
+   * Preserve unsaved edits made to the performance
+   * that is currently on screen.
+   */
+  saveCurrentPerformanceAssignments_();
+
+  selectedIndex =
+    Math.max(
+      0,
+      Number(index || 0)
+    );
+
+  const perf =
+    (data.performances || [])[
+      selectedIndex
+    ] || {};
+
+  const performanceLabel =
+    perf.inOutText ||
+    perf.performance ||
+    perf.label ||
+    "";
+
+  currentPerformanceKey =
+    performanceAssignmentKey_(
+      performanceLabel
+    );
+
+  const performanceState =
+    performanceAssignments[
+      currentPerformanceKey
+    ] || buildDefaultPerformanceAssignments_(
+      perf
+    );
+
+  performanceAssignments[
+    currentPerformanceKey
+  ] =
+    cloneClientObject_(
+      performanceState
+    );
+
+  /*
+   * Replace the assignment values. Do not merge them into
+   * the previously selected performance's values.
+   */
+  assignments.values =
+    Object.assign(
+      {},
+      performanceState.values || {}
+    );
+
+  assignments.values.conductor =
+    perf.conductor ||
+    assignments.values.conductor ||
+    "";
+
+  assignments.officeShow =
+    performanceState.officeShow ===
+    true;
+
+  assignments.officeShowPerson =
+    performanceState.officeShowPerson ||
+    "";
+
+  assignments.training =
+    normalizePerformanceTraining_(
+      cloneClientObject_(
+        performanceState.training || {}
+      )
+    );
+
+  selectedGuestInfo = {
+    name:
+      perf.guestSpeller || "",
+
+    dateTimeText:
+      perf.guestDateTimeText || "",
+
+    note:
+      perf.guestNote || ""
+  };
+
+  renderPerformanceButtons_();
+  renderAssignments_();
+
+  const notes =
+    document.getElementById(
+      "notesInput"
+    );
+
+  if (notes) {
+    notes.value =
+      selectedGuestInfo.note
+        ? [
+            selectedGuestInfo.note,
+            baseNotes
+          ]
+            .filter(Boolean)
+            .join("\n")
+        : baseNotes;
+  }
+
+  refreshHero_();
+}
+
+  function renderAssignments_() {
+    renderAssignmentGroup_("stageManagement", "stageManagementAssignments");
+    renderAssignmentGroup_("music", "musicAssignments");
+    renderAssignmentGroup_("audio", "audioAssignments");
+
+    const office = document.getElementById("officeShowEnabled");
+    if (office) office.checked = assignments.officeShow === true;
+    renderOfficeShow_();
+
+    ["stageManagement", "audio"].forEach(function (groupId) {
+      const checkbox = document.getElementById(groupId + "TrainingEnabled");
+      if (checkbox) checkbox.checked =
+        assignments.training[groupId].enabled === true;
+
+      renderTraining_(groupId);
+    });
+  }
+
+  function saveCurrentPerformanceAssignments_() {
+  if (!currentPerformanceKey) {
+    return;
+  }
+
+  performanceAssignments[
+    currentPerformanceKey
+  ] = {
+    performance:
+      (
+        (data.performances || [])[
+          selectedIndex
+        ] || {}
+      ).inOutText || "",
+
+    source:
+      "PrepDialog",
+
+    values:
+      Object.assign(
+        {},
+        assignments.values || {}
+      ),
+
+    officeShow:
+      assignments.officeShow ===
+      true,
+
+    officeShowPerson:
+      assignments.officeShowPerson ||
+      "",
+
+    training:
+      cloneClientObject_(
+        assignments.training || {}
+      )
+  };
+}
+
+
+function buildDefaultPerformanceAssignments_(
+  performance
+) {
+  performance =
+    performance || {};
+
+  const values =
+    Object.assign(
+      {},
+      (
+        data.assignments &&
+        data.assignments.values
+          ? data.assignments.values
+          : {}
+      )
+    );
+
+  values.conductor =
+    performance.conductor ||
+    values.conductor ||
+    "";
+
+  return {
+    performance:
+      performance.inOutText ||
+      performance.performance ||
+      performance.label ||
+      "",
+
+    source:
+      "AssignmentOS",
+
+    values:
+      values,
+
+    officeShow:
+      false,
+
+    officeShowPerson:
+      "",
+
+    training:
+      normalizePerformanceTraining_(
+        {}
+      )
+  };
+}
+
+
+function normalizePerformanceTraining_(
+  training
+) {
+  training =
+    training || {};
+
+  ["stageManagement", "audio"]
+    .forEach(function (groupId) {
+      training[groupId] =
+        training[groupId] || {
+          enabled: false,
+          trackId: "",
+          trainer: "",
+          trainee: "",
+          note: "",
+          mode: "Training"
+        };
+    });
+
+  return training;
+}
+
+
+function performanceAssignmentKey_(
+  value
+) {
+  return String(
+    value || ""
+  )
+    .toUpperCase()
+    .replace(/\s+/g, " ")
+    .trim();
+}
+
+
+function cloneClientObject_(
+  value
+) {
+  return JSON.parse(
+    JSON.stringify(
+      value || {}
+    )
+  );
+}
+
+  /* =========================================================
+   * OFFICE SHOW
+   * ========================================================= */
+
+  function toggleOfficeShow_() {
+    const checkbox = document.getElementById("officeShowEnabled");
+    assignments.officeShow = Boolean(checkbox && checkbox.checked);
+    if (!assignments.officeShow) assignments.officeShowPerson = "";
+    renderOfficeShow_();
+  }
+
+  function renderOfficeShow_() {
+    const container = document.getElementById("officeShowContainer");
+    if (!container) return;
+
+    if (assignments.officeShow !== true) {
+      container.innerHTML = "";
+      container.style.display = "none";
+      return;
+    }
+
+    container.style.display = "block";
+    const people = getOfficeShowPeople_();
+    const selected = assignments.officeShowPerson || "";
+
+    container.innerHTML = `
+      <div class="label">Person Taking Office Show</div>
+      <select onchange="officeShowPersonChanged_(this.value)">
+        <option value=""></option>
+        ${people.map(function (name) {
+          return `<option value="${escapeAttr_(name)}"
+            ${name === selected ? "selected" : ""}>${escapeHtml_(name)}</option>`;
+        }).join("")}
+      </select>
+    `;
+  }
+
+  function officeShowPersonChanged_(value) {
+    assignments.officeShowPerson = value || "";
+  }
+
+  function getOfficeShowPeople_() {
+    const people = [];
+    (assignments.tracks || [])
+      .filter(function (track) {
+        return track.departmentGroup === "stageManagement";
+      })
+      .forEach(function (track) {
+        ((((assignments.dropdowns || {}).peopleByTrack || {})[track.id] || []))
+          .forEach(function (person) {
+            const name = person && person.name ? person.name : person;
+            if (name && people.indexOf(name) === -1) people.push(name);
+          });
+      });
+
+    if (assignments.officeShowPerson &&
+        people.indexOf(assignments.officeShowPerson) === -1) {
+      people.push(assignments.officeShowPerson);
+    }
+
+    return people.sort();
+  }
+
+  function renderAssignmentGroup_(groupId, containerId) {
+    const container = document.getElementById(containerId);
+    if (!container) return;
+
+    const tracks = (assignments.tracks || []).filter(function (track) {
+      return track.departmentGroup === groupId;
+    });
+
+    container.innerHTML = tracks.map(function (track) {
+      return `
+        <div class="assignment-row">
+          <div class="assignment-track">${escapeHtml_(track.label)}</div>
+          <div>
+            ${assignmentDropdown_(track.id, assignments.values[track.id] || "")}
+            <div class="assignment-title" id="title_${escapeAttr_(track.id)}"></div>
+          </div>
+        </div>
+      `;
+    }).join("");
+
+    tracks.forEach(function (track) {
+      refreshAssignmentTitle_(track.id);
+    });
+  }
+
+  function assignmentDropdown_(trackId, selected) {
+    const people = (((assignments.dropdowns || {}).peopleByTrack || {})[trackId] || [])
+      .map(function (person) { return person.name || person; });
+
+    if (selected && people.indexOf(selected) === -1) people.unshift(selected);
+
+    return `
+      <select onchange="assignmentChanged_('${escapeAttr_(trackId)}', this.value)">
+        <option value=""></option>
+        ${people.map(function (name) {
+          return `<option value="${escapeAttr_(name)}"
+            ${name === selected ? "selected" : ""}>${escapeHtml_(name)}</option>`;
+        }).join("")}
+      </select>
+    `;
+  }
+
+  function assignmentChanged_(trackId, value) {
+    assignments.values[trackId] = value;
+    refreshAssignmentTitle_(trackId);
+
+    ["stageManagement", "audio"].forEach(function (groupId) {
+      const training = assignments.training[groupId];
+
+      if (
+        training.enabled &&
+        training.trackId === trackId &&
+        (!training.trainer || training.autoTrainer)
+      ) {
+        training.trainer = value;
+        training.autoTrainer = true;
+        renderTraining_(groupId);
+      }
+    });
+
+    refreshHero_();
+  }
+
+  function refreshAssignmentTitle_(trackId) {
+    const el = document.getElementById("title_" + trackId);
+    if (!el) return;
+
+    const personName = assignments.values[trackId] || "";
+    const person = ((((assignments.dropdowns || {}).peopleByTrack || {})[trackId] || [])
+      .find(function (candidate) {
+        return (candidate.name || candidate) === personName;
+      }));
+
+    el.textContent = person && person.title ? person.title : "";
+  }
+
+  function renderTraining_(groupId) {
+    const checkbox = document.getElementById(groupId + "TrainingEnabled");
+    const container = document.getElementById(groupId + "TrainingContainer");
+    if (!checkbox || !container) return;
+
+    const training = assignments.training[groupId];
+    training.enabled = checkbox.checked;
+
+    if (!training.enabled) {
+      container.innerHTML = "";
+      container.style.display = "none";
+      return;
+    }
+
+    container.style.display = "block";
+
+    const tracks = (assignments.tracks || []).filter(function (track) {
+      return track.departmentGroup === groupId;
+    });
+
+    const names = [];
+    tracks.forEach(function (track) {
+      ((((assignments.dropdowns || {}).peopleByTrack || {})[track.id] || []))
+        .forEach(function (person) {
+          const name = person.name || person;
+          if (name && names.indexOf(name) === -1) names.push(name);
+        });
+    });
+
+    container.innerHTML = `
+      <div class="prep-expanded-grid">
+        <div>
+          <div class="label">Track</div>
+          <select onchange="trainingTrackChanged_('${escapeAttr_(groupId)}', this.value)">
+            <option value=""></option>
+            ${tracks.map(function (track) {
+              return `<option value="${escapeAttr_(track.id)}"
+                ${track.id === training.trackId ? "selected" : ""}>
+                ${escapeHtml_(track.label)}
+              </option>`;
+            }).join("")}
+          </select>
+        </div>
+
+        <div>
+          <div class="label">Trainer</div>
+          ${trainingPersonDropdown_(groupId, "trainer", names)}
+        </div>
+
+        <div>
+          <div class="label">Trainee</div>
+          ${trainingPersonDropdown_(groupId, "trainee", names)}
+        </div>
+
+        <div>
+          <div class="label">Training Note</div>
+          <input value="${escapeAttr_(training.note || "")}"
+            oninput="assignments.training['${escapeAttr_(groupId)}'].note = this.value">
+        </div>
+      </div>
+    `;
+  }
+
+  function trainingPersonDropdown_(groupId, field, people) {
+    const training = assignments.training[groupId];
+
+    return `
+      <select onchange="trainingPersonChanged_('${groupId}', '${field}', this.value)">
+        <option value=""></option>
+        ${people.sort().map(function (name) {
+          return `<option value="${escapeAttr_(name)}"
+            ${name === training[field] ? "selected" : ""}>
+            ${escapeHtml_(name)}
+          </option>`;
+        }).join("")}
+      </select>
+    `;
+  }
+
+  function trainingTrackChanged_(groupId, trackId) {
+    const training = assignments.training[groupId];
+    training.trackId = trackId;
+    training.trainer = assignments.values[trackId] || "";
+    training.autoTrainer = true;
+    renderTraining_(groupId);
+  }
+
+  function trainingPersonChanged_(groupId, field, value) {
+    assignments.training[groupId][field] = value;
+    if (field === "trainer") assignments.training[groupId].autoTrainer = false;
+  }
+
+  function renderOuts_() {
+    const status = document.getElementById("plannedOutsStatus");
+    status.textContent = plannedOuts.length
+      ? plannedOuts.length + " planned out" + (plannedOuts.length === 1 ? "" : "s") + " found."
+      : "No planned outs found.";
+
+    document.getElementById("plannedOutsContainer").innerHTML =
+      plannedOuts.map(function (out, index) {
+        return outCard_(out, index, "planned");
+      }).join("");
+
+    document.getElementById("callInsContainer").innerHTML =
+      callIns.map(function (out, index) {
+        return callInEditor_(out, index);
+      }).join("");
+
+    refreshHero_();
+  }
+
+  function outCard_(out, index, source) {
+    const prefix = source + "_" + index;
+    const selected = out.noCoverNeeded
+      ? "No cover needed"
+      : (out.finalInActor || out.preselectedCover || "");
+
+    const unavailable = selectedCoverNames_(source, index);
+
+    const options = (out.coverOptions || []).filter(function (name) {
+      return !unavailable[name] || name === selected;
+    });
+
+    return `
+      <div class="out-card ${selected || out.noCoverNeeded ? "complete" : ""}">
+        <div class="out-name">${escapeHtml_(out.actor || "New Call-In")} OUT</div>
+        <div class="badges">
+          <span class="badge">${escapeHtml_(out.reason || "Out")}</span>
+          ${out.isContractLOA ? '<span class="badge loa">Not on IN/OUT</span>' : '<span class="badge">IN/OUT</span>'}
+        </div>
+
+        <div class="small">
+          <strong>Character:</strong> ${escapeHtml_(out.role || "Not found")}<br>
+          <strong>Status:</strong> ${escapeHtml_(out.status || "Review")}<br>
+          <strong>Performances:</strong> ${escapeHtml_(out.performances || "Not listed")}
+        </div>
+
+        ${out.noCoverNeeded ? `
+          <div class="cover-box" style="margin-top:10px;">No cover needed</div>
+        ` : `
+          <div class="label" style="margin-top:10px;">
+            ${out.isContractLOA ? "Temporary replacement" : "Who is covering?"}
+          </div>
+          <select onchange="coverChanged_('${source}', ${index}, this.value)">
+            <option value="">Choose cover...</option>
+            ${options.map(function (name) {
+              return `<option value="${escapeAttr_(name)}"
+                ${name === selected ? "selected" : ""}>
+                ${escapeHtml_(name)}
+              </option>`;
+            }).join("")}
+            <option value="__manual__">Other / Type manually...</option>
+          </select>
+          <input id="manual_${prefix}" style="display:none; margin-top:8px;"
+            placeholder="Type name manually"
+            oninput="manualCoverChanged_('${source}', ${index}, this.value)">
+        `}
+      </div>
+    `;
+  }
+
+  function callInEditor_(item, index) {
+    const actors = ((data.intelligence || {}).actorOptions || []);
+    const reasons = ((data.intelligence || {}).reasonOptions || []);
+
+    return `
+      <div class="out-card">
+        <div class="label">Who is OUT?</div>
+        <select onchange="callInActorChanged_(${index}, this.value)">
+          <option value="">Choose actor...</option>
+          ${actors.map(function (actor) {
+            return `<option value="${escapeAttr_(actor.fullName)}"
+              ${actor.fullName === item.actor ? "selected" : ""}>
+              ${escapeHtml_(actor.fullName)}
+            </option>`;
+          }).join("")}
+        </select>
+
+        <div class="label" style="margin-top:10px;">Reason</div>
+        <select onchange="callIns[${index}].reason = this.value; renderOuts_();">
+          ${reasons.map(function (reason) {
+            return `<option value="${escapeAttr_(reason)}"
+              ${reason === item.reason ? "selected" : ""}>
+              ${escapeHtml_(reason)}
+            </option>`;
+          }).join("")}
+        </select>
+
+        ${item.actor ? outCard_(item, index, "callin") : ""}
+
+        <button class="danger" style="margin-top:10px;"
+          onclick="removeCallInRow(${index})">Remove</button>
+      </div>
+    `;
+  }
+
+  function addCallInRow() {
+    callIns.push(normalizeClientOut_({
+      source: "callin",
+      reason: "Illness",
+      status: "Day-of",
+      writeToInOutSheet: true
+    }));
+
+    renderOuts_();
+  }
+
+  function removeCallInRow(index) {
+    callIns.splice(index, 1);
+    renderOuts_();
+  }
+
+  function callInActorChanged_(index, actorName) {
+    const actor = ((data.intelligence || {}).actorOptions || [])
+      .find(function (candidate) {
+        return candidate.fullName === actorName;
+      });
+
+    const item = callIns[index];
+    item.actor = actorName;
+    item.out = actorName;
+    item.role = actor ? (actor.character || actor.role || "") : "";
+
+    const noCoverNeeded =
+      /\b(swing|understudy|u\/s|standby)\b/i.test(
+        [item.role, actor && actor.role].join(" ")
+      );
+
+    item.noCoverNeeded = noCoverNeeded;
+    item.finalInActor = "";
+
+    item.coverOptions = noCoverNeeded
+      ? []
+      : ((data.intelligence || {}).actorOptions || [])
+          .filter(function (candidate) {
+            const covers = String(candidate.covers || "")
+              .split(/[\n,]/)
+              .map(normalizeRole_);
+
+            return covers.indexOf(normalizeRole_(item.role)) !== -1;
+          })
+          .map(function (candidate) {
+            return candidate.fullName;
+          })
+          .sort();
+
+    renderOuts_();
+  }
+
+  function coverChanged_(source, index, value) {
+    const list = source === "planned" ? plannedOuts : callIns;
+    const item = list[index];
+    const manual = document.getElementById("manual_" + source + "_" + index);
+
+    if (value === "__manual__") {
+      if (manual) {
+        manual.style.display = "block";
+        manual.focus();
+      }
+      item.finalInActor = "";
+    } else {
+      if (manual) manual.style.display = "none";
+      item.finalInActor = value || "";
+    }
+
+    refreshHero_();
+  }
+
+  function manualCoverChanged_(source, index, value) {
+    const list = source === "planned" ? plannedOuts : callIns;
+    list[index].finalInActor = String(value || "").trim();
+    refreshHero_();
+  }
+
+  function selectedCoverNames_(source, currentIndex) {
+    const used = {};
+
+    [
+      ["planned", plannedOuts],
+      ["callin", callIns]
+    ].forEach(function (entry) {
+      entry[1].forEach(function (item, index) {
+        if (entry[0] === source && index === currentIndex) return;
+        if (item.finalInActor) used[item.finalInActor] = true;
+      });
+    });
+
+    return used;
+  }
+
+  function collectOuts_(list) {
+    return list.map(function (item) {
+      return {
+        out: item.actor || item.out || "",
+        in: item.noCoverNeeded ? "" : (item.finalInActor || ""),
+        role: item.role || "",
+        reason: item.reason || "",
+        noCoverNeeded: Boolean(item.noCoverNeeded),
+        writeToInOutSheet:
+          item.writeToInOutSheet !== false &&
+          !item.isContractLOA
+      };
+    }).filter(function (item) {
+      return item.out;
+    });
+  }
+
+  function applyPrep() {
+  saveCurrentPerformanceAssignments_();
+  const perf =
+    (data.performances || [])[selectedIndex] || {};
+
+  const status =
+    document.getElementById("status");
+
+  const payload = {
+    date:
+      data.date ||
+      data.prettyDate ||
+      "",
+
+    performance:
+      perf.inOutText ||
+      "",
+
+    conductor:
+      assignments.values.conductor ||
+      perf.conductor ||
+      "",
+
+    notes:
+      document.getElementById("notesInput").value ||
+      "",
+
+    castOuts:
+      collectOuts_(plannedOuts)
+        .concat(collectOuts_(callIns)),
+
+    assignments:
+      assignments,
+
+    guestSpellerName:
+      selectedGuestInfo.name ||
+      "",
+
+    guestDateTimeText:
+      selectedGuestInfo.dateTimeText ||
+      "",
+
+    guestSpellerNote:
+      selectedGuestInfo.note ||
+      ""
+  };
+
+  status.textContent = "Applying...";
+
+  google.script.run
+    .withSuccessHandler(function (result) {
+      if (
+        !result ||
+        result.success === false ||
+        result.ok === false
+      ) {
+        status.textContent =
+          result && result.message
+            ? result.message
+            : "Prep could not be completed.";
+
+        return;
+      }
+
+      status.textContent =
+        result.message ||
+        "IN/OUT updated. Opening Export...";
+
+      const exportData =
+        result.nextData || {
+          date: payload.date,
+          performance: payload.performance,
+          guestSpellerName:
+            payload.guestSpellerName,
+          guestDateTimeText:
+            payload.guestDateTimeText,
+          guestSpellerNote:
+            payload.guestSpellerNote
+        };
+
+      google.script.run
+        .withSuccessHandler(function () {
+          console.log(
+            "Export dialog opened."
+          );
+        })
+        .withFailureHandler(function (error) {
+          status.textContent =
+            "IN/OUT was updated, but Export could not open: " +
+            (
+              error && error.message
+                ? error.message
+                : String(error)
+            );
+
+          console.error(error);
+        })
+        .showInOutExportDialog(exportData);
+    })
+    .withFailureHandler(function (error) {
+      status.textContent =
+        "Error: " +
+        (
+          error && error.message
+            ? error.message
+            : String(error)
+        );
+
+      console.error(error);
+    })
+    .prepOS_applyPayload(payload);
+}
+
+  function refreshHero_() {
+    const perf = (data.performances || [])[selectedIndex] || {};
+    const principalOuts =
+      collectOuts_(plannedOuts)
+        .concat(collectOuts_(callIns))
+        .filter(function (item) {
+          return item.out && item.role && !item.noCoverNeeded;
+        });
+
+    document.getElementById("topSummaryPerformance").textContent =
+      formatPerformance_(perf.inOutText || "Performance Prep");
+
+    document.getElementById("topSummaryDate").textContent =
+      data.prettyDate || data.date || "";
+
+    document.getElementById("topSummaryConductor").textContent =
+      assignments.values.conductor
+        ? "Conductor: " + assignments.values.conductor
+        : "";
+
+    document.getElementById("topSummaryMeta").textContent =
+      (principalOuts.length
+        ? principalOuts.length + " Principal Out" + (principalOuts.length === 1 ? "" : "s")
+        : "No Principal Outs") +
+      (selectedGuestInfo.name ? " • Guest Speller" : "");
+  }
+
+  function normalizeClientOut_(out) {
+    out = out || {};
+
+    return {
+      actor: out.actor || out.actorOut || out.out || "",
+      out: out.actor || out.actorOut || out.out || "",
+      role: out.role || out.character || "",
+      reason: out.reason || out.status || "",
+      status: out.status || "Review",
+      performances: out.performances || out.performanceCount || "1",
+      isContractLOA: Boolean(out.isContractLOA || out.isLoa || out.isMloa),
+      writeToInOutSheet: out.writeToInOutSheet !== false,
+      noCoverNeeded: Boolean(out.noCoverNeeded),
+      finalInActor:
+        out.finalInActor ||
+        out.preselectedCover ||
+        out.tempReplacement ||
+        out.weeklyAssigned ||
+        out.inActor ||
+        out.in ||
+        "",
+      preselectedCover:
+        out.preselectedCover ||
+        out.tempReplacement ||
+        out.weeklyAssigned ||
+        out.inActor ||
+        out.in ||
+        "",
+      coverOptions: (out.coverOptions || []).slice()
+    };
+  }
+
+  function performanceType_(text) {
+    text = String(text || "").toUpperCase();
+    if (text.indexOf("MAT") !== -1) return "MATINEE";
+    if (text.indexOf("EVE") !== -1) return "EVENING";
+    return "PERFORMANCE";
+  }
+
+  function formatPerformance_(text) {
+    const match = String(text || "").match(/PERFORMANCE\s*#?\s*(\d+)/i);
+    return match ? "PERFORMANCE #" + match[1] : String(text || "");
+  }
+
+  function normalizeRole_(value) {
+    return String(value || "")
+      .toLowerCase()
+      .replace(/[^a-z0-9]/g, "");
+  }
+
+  function escapeHtml_(value) {
+    return String(value == null ? "" : value)
+      .replace(/&/g, "&amp;")
+      .replace(/</g, "&lt;")
+      .replace(/>/g, "&gt;")
+      .replace(/"/g, "&quot;");
+  }
+
+  function escapeAttr_(value) {
+    return escapeHtml_(value).replace(/'/g, "&#39;");
+  }
+
+  function renderError(err) {
+    document.getElementById("content").innerHTML =
+      '<div class="error">' +
+      escapeHtml_(err && err.error ? err.error : String(err || "Unknown error")) +
+      "</div>";
+  }
+</script>

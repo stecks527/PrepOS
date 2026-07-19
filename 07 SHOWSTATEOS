@@ -1,0 +1,2950 @@
+/*************************************************
+ * 07 SHOWSTATEOS
+ * Version: 4.2.0
+ * Status: ACTIVE
+ *
+ * Canonical public API for current production state.
+ *************************************************/
+
+function ShowStateOS() {
+  return {
+    current: function () {
+      return buildShowState();
+    },
+
+    get: function () {
+      return buildShowState();
+    },
+
+    refresh: function () {
+      clearShowStateOSCache();
+      return buildShowState();
+    },
+
+    clearCache: function () {
+      return clearShowStateOSCache();
+    },
+
+    clearAllCaches: function () {
+      if (
+        typeof clearShowStateAndConductorCaches ===
+        "function"
+      ) {
+        return clearShowStateAndConductorCaches();
+      }
+
+      return clearShowStateOSCache();
+    },
+
+    status: function () {
+      return showStateOSStatus_();
+    },
+
+    test: function () {
+      return testShowStateOSPlatformAPI();
+    }
+  };
+}
+
+
+/*************************************************
+ * STATUS
+ *************************************************/
+
+function showStateOSStatus_() {
+  const startedAt = Date.now();
+
+  let state = null;
+  let error = "";
+
+  try {
+    state = buildShowState();
+  } catch (err) {
+    error = String(
+      err && err.message
+        ? err.message
+        : err
+    );
+  }
+
+  const performances =
+    state &&
+    Array.isArray(state.performances)
+      ? state.performances
+      : [];
+
+  const assignments =
+    state && state.assignments
+      ? state.assignments
+      : {};
+
+  const intelligence =
+    state && state.intelligence
+      ? state.intelligence
+      : {};
+
+  const assignmentTracks =
+    Array.isArray(assignments.tracks)
+      ? assignments.tracks
+      : [];
+
+  const plannedOuts =
+    Array.isArray(intelligence.plannedOuts)
+      ? intelligence.plannedOuts
+      : [];
+
+  return {
+    system: "ShowStateOS",
+    version: "4.2.0",
+    available: Boolean(state),
+
+    healthy: Boolean(
+      state &&
+      state.date &&
+      performances.length
+    ),
+
+    error: error,
+
+    date: state
+      ? (
+          state.prettyDate ||
+          state.date ||
+          ""
+        )
+      : "",
+
+    weeklyName: state
+      ? state.weeklyName || ""
+      : "",
+
+    performances: performances.length,
+    assignmentTracks: assignmentTracks.length,
+    plannedOuts: plannedOuts.length,
+
+    selectedIndex:
+      state &&
+      state.selectedIndex !== undefined
+        ? state.selectedIndex
+        : null,
+
+    buildDurationMs:
+      Date.now() - startedAt,
+
+    cacheAvailable:
+      typeof showStateGetCachedState_ ===
+      "function",
+
+    conductorCacheAvailable:
+      typeof getExpandedCalendarConductorMap_ ===
+      "function",
+
+    intelligenceAvailable:
+      typeof addPrepIntelligenceToShowState_ ===
+      "function"
+  };
+}
+
+
+/*************************************************
+ * PLATFORM API TEST
+ *************************************************/
+
+function testShowStateOSPlatformAPI() {
+  const os = ShowStateOS();
+
+  const requiredMethods = [
+    "current",
+    "get",
+    "refresh",
+    "clearCache",
+    "clearAllCaches",
+    "status",
+    "test"
+  ];
+
+  const missingMethods =
+    requiredMethods.filter(
+      function (methodName) {
+        return (
+          typeof os[methodName] !==
+          "function"
+        );
+      }
+    );
+
+  const state = os.current();
+  const status = os.status();
+
+  const result = {
+    healthy:
+      status.healthy &&
+      missingMethods.length === 0,
+
+    methodsChecked:
+      requiredMethods.length,
+
+    missingMethods:
+      missingMethods,
+
+    date:
+      status.date,
+
+    weeklyName:
+      status.weeklyName,
+
+    performances:
+      status.performances,
+
+    assignmentTracks:
+      status.assignmentTracks,
+
+    plannedOuts:
+      status.plannedOuts,
+
+    selectedIndex:
+      status.selectedIndex,
+
+    buildDurationMs:
+      status.buildDurationMs,
+
+    stateAvailable:
+      Boolean(state),
+
+    cacheAvailable:
+      status.cacheAvailable,
+
+    conductorCacheAvailable:
+      status.conductorCacheAvailable,
+
+    intelligenceAvailable:
+      status.intelligenceAvailable
+  };
+
+  Logger.log(
+    "SHOWSTATEOS PLATFORM API TEST"
+  );
+
+  Logger.log(
+    JSON.stringify(
+      result,
+      null,
+      2
+    )
+  );
+
+  SpreadsheetApp
+    .getUi()
+    .alert(
+      "ShowStateOS platform API test " +
+      (
+        result.healthy
+          ? "passed."
+          : "found issues."
+      ) +
+      "\n\n" +
+      "Methods checked: " +
+      result.methodsChecked +
+      "\n" +
+      "Missing methods: " +
+      result.missingMethods.length +
+      "\n" +
+      "Date: " +
+      result.date +
+      "\n" +
+      "Performances: " +
+      result.performances +
+      "\n" +
+      "Assignment tracks: " +
+      result.assignmentTracks +
+      "\n" +
+      "Planned outs: " +
+      result.plannedOuts +
+      "\n\n" +
+      "Build duration: " +
+      result.buildDurationMs +
+      " ms"
+    );
+
+  return result;
+}
+
+
+/*************************************************
+ * 25 SHOWSTATEOS - API
+ * Version: 4.0.1
+ * Status: ACTIVE
+ *
+ * Canonical Show State builder plus existing
+ * export, Weekly, conductor, and cast helpers.
+ *************************************************/
+
+/*************************************************
+ * SHOW STATE BUILDER
+ *************************************************/
+
+function buildShowState() {
+  const performanceTimer =
+    typeof TimerOS === "function"
+      ? TimerOS("ShowState Build")
+      : null;
+
+  const totalStartedAt =
+    Date.now();
+
+  let stepStartedAt =
+    totalStartedAt;
+
+
+  function timer(label) {
+    const now =
+      Date.now();
+
+    Logger.log(
+      label +
+      ": " +
+      (now - stepStartedAt) +
+      "ms"
+    );
+
+    stepStartedAt =
+      now;
+  }
+
+  function markPerformanceTimer_(
+    label,
+    metadata
+  ) {
+    if (!performanceTimer) {
+      return;
+    }
+
+    performanceTimer.mark(
+      label,
+      metadata || {}
+    );
+  }
+
+
+  function finishPerformanceTimer_(
+    state,
+    source
+  ) {
+    if (!performanceTimer) {
+      return;
+    }
+
+    state =
+      state || {};
+
+    const intelligence =
+      state.intelligence || {};
+
+    performanceTimer.finish({
+      source:
+        source || "rebuilt",
+
+      date:
+        state.prettyDate ||
+        state.date ||
+        "",
+
+      performances:
+        Array.isArray(
+          state.performances
+        )
+          ? state.performances.length
+          : 0,
+
+      plannedOuts:
+        Array.isArray(
+          intelligence.plannedOuts
+        )
+          ? intelligence.plannedOuts.length
+          : 0,
+
+      assignmentTracks:
+        state.assignments &&
+        Array.isArray(
+          state.assignments.tracks
+        )
+          ? state.assignments.tracks.length
+          : 0
+    });
+  }
+
+
+  const ss =
+    SpreadsheetApp
+      .getActiveSpreadsheet();
+
+  const ui =
+    SpreadsheetApp
+      .getUi();
+
+  const inOut =
+    ss.getSheetByName(
+      "IN/OUT"
+    );
+
+  timer(
+    "Setup"
+  );
+
+  markPerformanceTimer_(
+    "Setup"
+  );
+
+
+  if (!inOut) {
+    finishPerformanceTimer_(
+      null,
+      "failed"
+    );
+
+    throw new Error(
+      'Could not find "IN/OUT" tab.'
+    );
+  }
+
+
+  const identityRanges =
+    inOut
+      .getRangeList([
+        "A3",
+        "A4",
+        "A24"
+      ])
+      .getRanges();
+
+
+  const dateText =
+    prepOSClean_(
+      identityRanges[0]
+        .getDisplayValue()
+    );
+
+
+  const currentPerformanceText =
+    prepOSClean_(
+      identityRanges[1]
+        .getDisplayValue()
+    );
+
+
+  const currentConductor =
+    prepOSClean_(
+      identityRanges[2]
+        .getDisplayValue()
+    );
+
+
+  const targetDate =
+    prepOSParseDate_(
+      dateText
+    );
+
+
+  timer(
+    "Read settings/date"
+  );
+
+  markPerformanceTimer_(
+    "Read settings/date",
+    {
+      dateText:
+        dateText,
+
+      currentPerformance:
+        currentPerformanceText,
+
+      currentConductor:
+        currentConductor
+    }
+  );
+
+
+  if (!targetDate) {
+    finishPerformanceTimer_(
+      {
+        date:
+          dateText
+      },
+      "invalid-date"
+    );
+
+    ui.alert(
+      "Could not read the date in IN/OUT!A3."
+    );
+
+    return null;
+  }
+
+
+  const cacheKey =
+    showStateBuildCacheKey_(
+      dateText,
+      currentPerformanceText,
+      currentConductor
+    );
+
+
+  const cachedState =
+    showStateGetCachedState_(
+      cacheKey
+    );
+
+
+  markPerformanceTimer_(
+    "Check ShowState cache",
+    {
+      cacheHit:
+        Boolean(
+          cachedState
+        )
+    }
+  );
+
+
+  if (cachedState) {
+    Logger.log(
+      "Show State source: short-lived cache"
+    );
+
+    Logger.log(
+      "TOTAL Show State: " +
+      (
+        Date.now() -
+        totalStartedAt
+      ) +
+      "ms"
+    );
+
+    finishPerformanceTimer_(
+      cachedState,
+      "short-lived-cache"
+    );
+
+    return cachedState;
+  }
+
+
+  const settings =
+    typeof getPrepSettings_ ===
+      "function"
+      ? getPrepSettings_()
+      : {};
+
+
+  const timezone =
+    Session
+      .getScriptTimeZone();
+
+
+  const targetDay =
+    Utilities
+      .formatDate(
+        targetDate,
+        timezone,
+        "EEEE"
+      )
+      .toUpperCase();
+
+
+  const targetMonth =
+    Utilities
+      .formatDate(
+        targetDate,
+        timezone,
+        "MMMM"
+      )
+      .toUpperCase();
+
+
+  const targetDayNum =
+    String(
+      Number(
+        Utilities.formatDate(
+          targetDate,
+          timezone,
+          "d"
+        )
+      )
+    );
+
+
+  const prettyDate =
+    titleCase_(
+      targetDay
+    ) +
+    ", " +
+    titleCase_(
+      targetMonth
+    ) +
+    " " +
+    targetDayNum;
+
+
+  timer(
+    "Build target date labels"
+  );
+
+  markPerformanceTimer_(
+    "Build target date labels",
+    {
+      targetDay:
+        targetDay,
+
+      targetMonth:
+        targetMonth,
+
+      targetDayNum:
+        targetDayNum
+    }
+  );
+
+
+  if (
+    typeof WeeklyCacheOS !==
+      "function"
+  ) {
+    finishPerformanceTimer_(
+      {
+        date:
+          prettyDate
+      },
+      "failed"
+    );
+
+    throw new Error(
+      "WeeklyCacheOS() is unavailable."
+    );
+  }
+
+
+  const weeklyDay =
+    WeeklyCacheOS()
+      .getPrepDay(
+        targetDate,
+        targetDay,
+        targetMonth,
+        targetDayNum
+      );
+
+
+  timer(
+    "Find weekly prep cache"
+  );
+
+  markPerformanceTimer_(
+    "Find weekly prep source",
+    {
+      found:
+        Boolean(
+          weeklyDay
+        ),
+
+      source:
+        weeklyDay &&
+        weeklyDay.source
+          ? weeklyDay.source
+          : ""
+    }
+  );
+
+
+  Logger.log(
+    "Weekly prep source: " +
+    (
+      weeklyDay &&
+      weeklyDay.source
+        ? weeklyDay.source
+        : "unknown"
+    )
+  );
+
+
+  if (!weeklyDay) {
+    finishPerformanceTimer_(
+      {
+        date:
+          prettyDate
+      },
+      "weekly-day-not-found"
+    );
+
+    ui.alert(
+      "Could not find the weekly day header.\n\n" +
+      "Looking for: " +
+      targetDay +
+      " / " +
+      targetMonth +
+      " " +
+      targetDayNum
+    );
+
+    return null;
+  }
+
+
+  const dailyActivities =
+    buildShowStateDailyActivitiesFromWeeklyDay_(
+      weeklyDay
+    );
+
+  markPerformanceTimer_(
+    "Daily activities",
+    {
+      activities:
+        dailyActivities.length
+    }
+  );
+
+
+  let performances =
+    showStateClone_(
+      weeklyDay.performances ||
+      []
+    );
+
+
+  if (!performances.length) {
+    finishPerformanceTimer_(
+      {
+        date:
+          prettyDate,
+
+        weeklyName:
+          weeklyDay.sheetName ||
+          ""
+      },
+      "no-performances"
+    );
+
+    ui.alert(
+      "No performance was found for this date.\n\n" +
+      "Weekly tab used: " +
+      (
+        weeklyDay.sheetName ||
+        "(unknown)"
+      )
+    );
+
+    return null;
+  }
+
+
+  /*
+   * Preserve the current Expanded Calendar conductor
+   * override, with Weekly as fallback.
+   */
+  if (
+    typeof applyExpandedCalendarConductors_ ===
+      "function"
+  ) {
+    performances =
+      applyExpandedCalendarConductors_(
+        performances,
+        targetDate
+      );
+  }
+
+
+  timer(
+    "Get performances + conductors"
+  );
+
+  markPerformanceTimer_(
+    "Performances and conductors",
+    {
+      performances:
+        performances.length
+    }
+  );
+
+
+  let notesAndHoliday =
+    weeklyDay.notes ||
+    "";
+
+
+  const dollarFridayNote =
+    typeof getDollarFridayNote_ ===
+      "function"
+      ? getDollarFridayNote_(
+          targetDate,
+          settings
+        )
+      : "";
+
+
+  if (dollarFridayNote) {
+    notesAndHoliday =
+      notesAndHoliday
+        ? (
+            notesAndHoliday +
+            "\n" +
+            dollarFridayNote
+          )
+        : dollarFridayNote;
+  }
+
+
+  timer(
+    "Get notes/holiday"
+  );
+
+  markPerformanceTimer_(
+    "Notes and holiday",
+    {
+      hasNotes:
+        Boolean(
+          notesAndHoliday
+        ),
+
+      hasDollarFriday:
+        Boolean(
+          dollarFridayNote
+        )
+    }
+  );
+
+
+  /*
+   * Guest Speller source of truth:
+   * 1. Expanded Calendar lookup for each performance.
+   * 2. Prep Guest Speller cache as a compatibility fallback.
+   *
+   * This prevents a circular dependency where Prep can only
+   * cache a guest that ShowState had already discovered.
+   */
+  const guestCache =
+    typeof getGuestSpellerCache_ ===
+      "function"
+      ? getGuestSpellerCache_()
+      : {};
+
+
+  performances.forEach(
+    function (performance) {
+      const performanceNumber =
+        performance.number ||
+        (
+          typeof getPerformanceNumber_ ===
+            "function"
+            ? getPerformanceNumber_(
+                performance.inOutText || ""
+              )
+            : ""
+        );
+
+
+      const expandedGuest =
+        typeof getStageOSGuestSpellerForPerformance ===
+          "function"
+          ? getStageOSGuestSpellerForPerformance(
+              dateText,
+              performanceNumber,
+              performance.inOutText || ""
+            )
+          : {};
+
+
+      const matchesCachedPerformance =
+        guestCache &&
+        guestCache.performance ===
+          performance.inOutText;
+
+
+      const guestName =
+        (
+          expandedGuest &&
+          (
+            expandedGuest.guestSpellerName ||
+            expandedGuest.name
+          )
+        ) ||
+        (
+          matchesCachedPerformance
+            ? guestCache.guestSpellerName
+            : ""
+        ) ||
+        "";
+
+
+      const guestDateTimeText =
+        (
+          expandedGuest &&
+          (
+            expandedGuest.guestDateTimeText ||
+            expandedGuest.dateTimeText
+          )
+        ) ||
+        (
+          matchesCachedPerformance
+            ? guestCache.guestDateTimeText
+            : ""
+        ) ||
+        "";
+
+
+      const guestNote =
+        (
+          expandedGuest &&
+          expandedGuest.note
+        ) ||
+        (
+          matchesCachedPerformance
+            ? guestCache.guestSpellerNote
+            : ""
+        ) ||
+        "";
+
+
+      performance.guestSpeller =
+        guestName;
+
+      performance.guestDateTimeText =
+        guestDateTimeText;
+
+      performance.guestNote =
+        guestNote;
+    }
+  );
+
+
+  timer(
+    "Guest spellers"
+  );
+
+  markPerformanceTimer_(
+    "Guest Speller hydration",
+    {
+      cachedGuest:
+        Boolean(
+          guestCache &&
+          guestCache.guestSpellerName
+        )
+    }
+  );
+
+
+  const selectedIndex =
+    performances.length === 1
+      ? 0
+      : null;
+
+
+  const defaultPerformance =
+    performances[
+      selectedIndex === null
+        ? 0
+        : selectedIndex
+    ] ||
+    {};
+
+
+  const castOuts =
+    showStateClone_(
+      weeklyDay.castOuts ||
+      []
+    );
+
+
+  const dropdowns =
+    showStateGetCachedInOutDropdowns_();
+
+
+  timer(
+    "Get cast outs + dropdowns"
+  );
+
+  markPerformanceTimer_(
+    "Cast outs and dropdowns",
+    {
+      castOuts:
+        castOuts.length
+    }
+  );
+
+
+  const assignments =
+    showStateGetCachedAssignments_(
+      defaultPerformance,
+      currentConductor
+    );
+
+
+  timer(
+    "Get cached assignment state"
+  );
+
+  markPerformanceTimer_(
+    "Assignment state",
+    {
+      tracks:
+        assignments &&
+        Array.isArray(
+          assignments.tracks
+        )
+          ? assignments.tracks.length
+          : 0
+    }
+  );
+
+
+  const staffing = {
+    callingSM:
+      assignments.values &&
+      assignments.values.calling
+        ? assignments.values.calling
+        : "",
+
+    deckSM:
+      assignments.values &&
+      assignments.values.deck
+        ? assignments.values.deck
+        : "",
+
+    conductor:
+      assignments.values &&
+      assignments.values.conductor
+        ? assignments.values.conductor
+        : (
+            defaultPerformance
+              .conductor ||
+            currentConductor ||
+            ""
+          ),
+
+    a1:
+      assignments.values &&
+      assignments.values.audio
+        ? assignments.values.audio
+        : ""
+  };
+
+
+  let state = {
+    system:
+      "ShowStateOS",
+
+    version:
+      "4.2.0",
+
+    date:
+      dateText,
+
+    prettyDate:
+      prettyDate,
+
+    weeklyName:
+      weeklyDay.sheetName ||
+      "",
+
+    target: {
+      date:
+        targetDate,
+
+      day:
+        targetDay,
+
+      month:
+        targetMonth,
+
+      dayNum:
+        targetDayNum,
+
+      timezone:
+        timezone
+    },
+
+    performances:
+      performances,
+
+    dailyActivities:
+      dailyActivities,  
+
+    selectedIndex:
+      selectedIndex,
+
+    selectedPerformance:
+      defaultPerformance,
+
+    notes:
+      notesAndHoliday,
+
+    currentCastOuts:
+      castOuts,
+
+    castOuts:
+      castOuts,
+
+    dropdowns:
+      dropdowns,
+
+    assignments:
+      assignments,
+
+    staffing:
+      staffing,
+
+    guestSpeller: {
+      exists:
+        Boolean(
+          defaultPerformance
+            .guestSpeller
+        ),
+
+      name:
+        defaultPerformance
+          .guestSpeller ||
+        "",
+
+      number:
+        defaultPerformance
+          .guestSpellerNumber ||
+        "",
+
+      note:
+        defaultPerformance
+          .guestNote ||
+        "",
+
+      dateTimeText:
+        defaultPerformance
+          .guestDateTimeText ||
+        ""
+    },
+
+    report: {
+      date:
+        dateText,
+
+      prettyDate:
+        prettyDate,
+
+      performance:
+        defaultPerformance
+          .inOutText ||
+        "",
+
+      performancesToday:
+        performances
+          .map(
+            function (
+              performance
+            ) {
+              return (
+                performance
+                  .inOutText ||
+                ""
+              );
+            }
+          )
+          .filter(
+            Boolean
+          ),
+
+      staffing:
+        staffing,
+
+      castOuts:
+        castOuts,
+
+      notes:
+        notesAndHoliday,
+
+      guest: {
+        exists:
+          Boolean(
+            defaultPerformance
+              .guestSpeller
+          ),
+
+        name:
+          defaultPerformance
+            .guestSpeller ||
+          "",
+
+        number:
+          defaultPerformance
+            .guestSpellerNumber ||
+          "",
+
+        note:
+          defaultPerformance
+            .guestNote ||
+          "",
+
+        dateTimeText:
+          defaultPerformance
+            .guestDateTimeText ||
+          ""
+      }
+    }
+  };
+
+
+  markPerformanceTimer_(
+    "Base ShowState model",
+    {
+      performances:
+        performances.length,
+
+      weeklyCastOuts:
+        castOuts.length
+    }
+  );
+
+
+  /*
+   * Add planned-outs and Prep intelligence.
+   */
+  if (
+    typeof addPrepIntelligenceToShowState_ ===
+      "function"
+  ) {
+    state =
+      addPrepIntelligenceToShowState_(
+        state
+      ) ||
+      state;
+  }
+
+
+  markPerformanceTimer_(
+    "Prep intelligence",
+    {
+      plannedOuts:
+        state.intelligence &&
+        Array.isArray(
+          state.intelligence
+            .plannedOuts
+        )
+          ? state.intelligence
+              .plannedOuts
+              .length
+          : 0,
+
+      actorOptions:
+        state.intelligence &&
+        Array.isArray(
+          state.intelligence
+            .actorOptions
+        )
+          ? state.intelligence
+              .actorOptions
+              .length
+          : 0
+    }
+  );
+
+
+  /*
+   * Restore saved performance-specific staffing
+   * after Prep intelligence is assembled.
+   */
+  if (
+    typeof PerformanceStaffingOS ===
+      "function"
+  ) {
+    state =
+      PerformanceStaffingOS()
+        .applyToShowState(
+          state
+        ) ||
+      state;
+  }
+
+
+  timer(
+    "Build intelligence"
+  );
+
+  markPerformanceTimer_(
+    "Restore performance staffing",
+    {
+      staffing:
+        state.staffing ||
+        {}
+    }
+  );
+
+
+  showStateSetCachedState_(
+    cacheKey,
+    state
+  );
+
+
+  markPerformanceTimer_(
+    "Write ShowState cache"
+  );
+
+
+  Logger.log(
+    "TOTAL Show State: " +
+    (
+      Date.now() -
+      totalStartedAt
+    ) +
+    "ms"
+  );
+
+
+  finishPerformanceTimer_(
+    state,
+    "rebuilt"
+  );
+
+
+  return state;
+}
+
+
+/*************************************************
+ * SHOWSTATEOS — DAILY ACTIVITIES
+ *
+ * Reads non-performance scheduled activities from
+ * the Weekly day block already identified by
+ * WeeklyCacheOS.
+ *************************************************/
+
+function buildShowStateDailyActivitiesFromWeeklyDay_(
+  weeklyDay
+) {
+  weeklyDay = weeklyDay || {};
+
+  const sheetName =
+    String(
+      weeklyDay.sheetName || ""
+    ).trim();
+
+  const dayStart =
+    Number(weeklyDay.dayStart);
+
+  const dayEnd =
+    Number(weeklyDay.dayEnd);
+
+  if (
+    !sheetName ||
+    !Number.isFinite(dayStart) ||
+    !Number.isFinite(dayEnd) ||
+    dayEnd <= dayStart
+  ) {
+    return [];
+  }
+
+  const sh =
+    SpreadsheetApp
+      .getActiveSpreadsheet()
+      .getSheetByName(sheetName);
+
+  if (!sh) {
+    return [];
+  }
+
+  /*
+   * WeeklyCacheOS returns zero-based row indexes.
+   * Sheet ranges are one-based, so add 1 here.
+   */
+  const firstSheetRow =
+    dayStart + 1;
+
+  const rowCount =
+    dayEnd - dayStart;
+
+  const columnCount =
+    Math.min(
+      Math.max(sh.getLastColumn(), 1),
+      5
+    );
+
+  const values =
+    sh.getRange(
+      firstSheetRow,
+      1,
+      rowCount,
+      columnCount
+    )
+      .getDisplayValues();
+
+  const activities = [];
+
+  for (
+    let index = 0;
+    index < values.length;
+    index++
+  ) {
+    const row =
+      values[index] || [];
+
+    const timeText =
+      normalizeShowStateActivityText_(
+        row[0]
+      );
+
+    const titleText =
+      normalizeShowStateActivityText_(
+        row[1] ||
+        row[2] ||
+        row[3]
+      );
+
+    const participants =
+      normalizeShowStateActivityText_(
+        row[4]
+      );
+
+    if (
+      !timeText ||
+      !titleText
+    ) {
+      continue;
+    }
+
+    if (
+      isShowStateNonActivityWeeklyRow_(
+        titleText
+      )
+    ) {
+      continue;
+    }
+
+    const timeInfo =
+      parseShowStateActivityTimeRange_(
+        timeText
+      );
+
+    if (!timeInfo.startText) {
+      continue;
+    }
+
+    activities.push({
+      source:
+        "Weekly Schedule",
+
+      sourceSheet:
+        sheetName,
+
+      sourceRow:
+        firstSheetRow + index,
+
+      type:
+        classifyShowStateDailyActivity_(
+          titleText
+        ),
+
+      title:
+        titleText,
+
+      startTime:
+        timeInfo.startText,
+
+      endTime:
+        timeInfo.endText,
+
+      timeText:
+        timeInfo.startText,
+
+      endTimeText:
+        timeInfo.endText,
+
+      participants:
+        participants,
+
+      originalText:
+        [
+          timeText,
+          titleText,
+          participants
+        ]
+          .filter(Boolean)
+          .join(" | ")
+    });
+  }
+
+  return activities;
+}
+
+
+function normalizeShowStateActivityText_(
+  value
+) {
+  return String(value || "")
+    .replace(/\r/g, "")
+    .replace(/\s+/g, " ")
+    .trim();
+}
+
+
+function parseShowStateActivityTimeRange_(
+  value
+) {
+  const text =
+    normalizeShowStateActivityText_(
+      value
+    );
+
+  const rangeMatch =
+    text.match(
+      /(\d{1,2}(?::\d{2})?\s*(?:AM|PM)?)\s*[-–]\s*(\d{1,2}(?::\d{2})?\s*(?:AM|PM)?)/i
+    );
+
+  if (rangeMatch) {
+    return {
+      startText:
+        normalizeShowStateActivityTime_(
+          rangeMatch[1],
+          rangeMatch[2]
+        ),
+
+      endText:
+        normalizeShowStateActivityTime_(
+          rangeMatch[2],
+          rangeMatch[1]
+        )
+    };
+  }
+
+  const singleMatch =
+    text.match(
+      /(\d{1,2}(?::\d{2})?\s*(?:AM|PM))/i
+    );
+
+  return {
+    startText:
+      singleMatch
+        ? normalizeShowStateActivityTime_(
+            singleMatch[1]
+          )
+        : "",
+
+    endText:
+      ""
+  };
+}
+
+
+function normalizeShowStateActivityTime_(
+  value,
+  companionValue
+) {
+  let text =
+    String(value || "")
+      .toUpperCase()
+      .replace(/\s+/g, " ")
+      .trim();
+
+  if (!text) {
+    return "";
+  }
+
+  /*
+   * In a range such as 3:30 PM–5:30 PM, both values
+   * already contain a meridiem. This fallback handles
+   * formats such as 3:30–5:30 PM.
+   */
+  if (
+    !/\b(?:AM|PM)\b/.test(text)
+  ) {
+    const companionMatch =
+      String(companionValue || "")
+        .toUpperCase()
+        .match(/\b(AM|PM)\b/);
+
+    if (companionMatch) {
+      text +=
+        " " +
+        companionMatch[1];
+    }
+  }
+
+  return text;
+}
+
+
+function isShowStateNonActivityWeeklyRow_(
+  title
+) {
+  const upper =
+    String(title || "")
+      .toUpperCase();
+
+  return (
+    upper.includes("PERFORMANCE #") ||
+    upper.startsWith("CONDUCTOR") ||
+    upper === "NOTES:" ||
+    upper === "NOTES" ||
+    upper.includes("CAST OUT") ||
+    upper.includes("CREW OUT")
+  );
+}
+
+
+function classifyShowStateDailyActivity_(
+  title
+) {
+  const upper =
+    String(title || "")
+      .toUpperCase();
+
+  if (
+    upper.includes("REHEARSAL") ||
+    upper.includes("BRUSH-UP") ||
+    upper.includes("BRUSH UP") ||
+    upper.includes("PUT-IN") ||
+    upper.includes("PUT IN")
+  ) {
+    return "REHEARSAL";
+  }
+
+  if (
+    upper.includes("MEETING") ||
+    upper.includes("CHECK-IN") ||
+    upper.includes("CHECK IN")
+  ) {
+    return "MEETING";
+  }
+
+  if (
+    upper.includes("WORK CALL")
+  ) {
+    return "WORK_CALL";
+  }
+
+  return "ACTIVITY";
+}
+
+
+
+/*************************************************
+ * 10 SHOW STATE FAST CACHE
+ *************************************************/
+
+const SHOW_STATE_CACHE_PROPERTY_ =
+  "SHOW_STATE_OS_FAST_CACHE";
+
+const SHOW_STATE_CACHE_MAX_AGE_MS_ =
+  90 * 1000;
+
+
+function showStateBuildCacheKey_(
+  dateText,
+  performanceText,
+  conductor
+) {
+  return [
+    prepOSClean_(dateText),
+    prepOSClean_(performanceText),
+    prepOSClean_(conductor)
+  ].join("|");
+}
+
+
+function showStateGetCachedState_(
+  expectedKey
+) {
+  const raw =
+    PropertiesService
+      .getDocumentProperties()
+      .getProperty(
+        SHOW_STATE_CACHE_PROPERTY_
+      );
+
+  if (!raw) return null;
+
+  try {
+    const cached =
+      JSON.parse(raw);
+
+    const age =
+      Date.now() -
+      Number(
+        cached.savedAt || 0
+      );
+
+    if (
+      age >
+      SHOW_STATE_CACHE_MAX_AGE_MS_
+    ) {
+      showStateClearFastCache_();
+      return null;
+    }
+
+    if (
+      cached.key !==
+      expectedKey
+    ) {
+      return null;
+    }
+
+    const state = cached.state || null;
+
+    if (
+      state &&
+      state.target &&
+      state.target.date &&
+      !(state.target.date instanceof Date)
+    ) {
+      const parsedDate = new Date(state.target.date);
+
+      if (!isNaN(parsedDate.getTime())) {
+        state.target.date = parsedDate;
+      }
+    }
+
+    return state;
+
+  } catch (err) {
+    showStateClearFastCache_();
+    return null;
+  }
+}
+
+
+function showStateSetCachedState_(
+  key,
+  state
+) {
+  try {
+    PropertiesService
+      .getDocumentProperties()
+      .setProperty(
+        SHOW_STATE_CACHE_PROPERTY_,
+        JSON.stringify({
+          savedAt:
+            Date.now(),
+
+          key:
+            key,
+
+          state:
+            state
+        })
+      );
+
+    return true;
+
+  } catch (err) {
+    Logger.log(
+      "Show State cache write skipped: " +
+      String(err)
+    );
+
+    return false;
+  }
+}
+
+
+function showStateClearFastCache_() {
+  PropertiesService
+    .getDocumentProperties()
+    .deleteProperty(
+      SHOW_STATE_CACHE_PROPERTY_
+    );
+}
+
+
+/*************************************************
+ * CACHED ASSIGNMENTS
+ *************************************************/
+
+function showStateGetCachedAssignments_(
+  defaultPerformance,
+  currentConductor
+) {
+  let cached = {};
+
+  if (
+    typeof AssignmentCacheOS ===
+    "function"
+  ) {
+    cached =
+      AssignmentCacheOS().get() ||
+      {};
+  }
+
+  const tracks =
+    showStateClone_(
+      cached.tracks ||
+      (
+        typeof AssignmentOS ===
+          "function"
+          ? AssignmentOS()
+              .getTracks()
+          : []
+      )
+    );
+
+  const groups =
+    showStateClone_(
+      cached.groups ||
+      (
+        typeof AssignmentOS ===
+          "function"
+          ? AssignmentOS()
+              .getGroups()
+          : []
+      )
+    );
+
+  const peopleByTrack =
+    showStateClone_(
+      cached.peopleByTrack ||
+      {}
+    );
+
+  const values =
+  typeof buildDefaultShowAssignmentValues_ ===
+    "function"
+    ? buildDefaultShowAssignmentValues_(
+        tracks,
+        (
+          defaultPerformance &&
+          defaultPerformance.conductor
+        ) ||
+        currentConductor ||
+        ""
+      )
+    : {
+        calling:
+          "Rachel A. Zucker",
+
+        deck:
+          "Chris Steckel",
+
+        conductor:
+          (
+            defaultPerformance &&
+            defaultPerformance.conductor
+          ) ||
+          currentConductor ||
+          "",
+
+        audio:
+          "Corbin Lenard"
+      };
+
+  return {
+    groups:
+      groups,
+
+    tracks:
+      tracks,
+
+    values:
+      values,
+
+    dropdowns: {
+      peopleByTrack:
+        peopleByTrack,
+
+      people:
+        cached.people ||
+        uniqueSorted_(
+          Object.keys(
+            peopleByTrack
+          )
+            .flatMap(
+              function (trackId) {
+                return (
+                  peopleByTrack[
+                    trackId
+                  ] ||
+                  []
+                );
+              }
+            )
+            .map(
+              function (person) {
+                return (
+                  person.name ||
+                  person
+                );
+              }
+            )
+        ),
+
+      tracks:
+        tracks
+    },
+
+    officeShow:
+      false,
+
+    training: {
+      stageManagement: {
+        enabled:
+          false,
+
+        trackId:
+          "",
+
+        trainer:
+          "",
+
+        trainee:
+          "",
+
+        note:
+          "",
+
+        mode:
+          "Training"
+      },
+
+      audio: {
+        enabled:
+          false,
+
+        trackId:
+          "",
+
+        trainer:
+          "",
+
+        trainee:
+          "",
+
+        note:
+          "",
+
+        mode:
+          "Training"
+      }
+    }
+  };
+}
+
+
+/*************************************************
+ * CACHED CAST DROPDOWNS
+ *************************************************/
+
+function showStateGetCachedInOutDropdowns_() {
+  if (
+    typeof CastListCacheOS !==
+    "function"
+  ) {
+    return {
+      out: [],
+      in: [],
+      role: [],
+      reason:
+        showStateReasonOptions_()
+    };
+  }
+
+  const cache =
+    CastListCacheOS().get() ||
+    {};
+
+  return {
+    out:
+      cache.actors || [],
+
+    in:
+      cache.actors || [],
+
+    role:
+      cache.roles || [],
+
+    reason:
+      showStateReasonOptions_()
+  };
+}
+
+
+function showStateReasonOptions_() {
+  return [
+    "Approved PD",
+    "Unapp PD",
+    "Illness",
+    "Injury",
+    "MLOA",
+    "LOA",
+    "Vacation",
+    "Conditional",
+    "Other"
+  ];
+}
+
+
+/*************************************************
+ * SAFE CLONE
+ *************************************************/
+
+function showStateClone_(
+  value
+) {
+  return JSON.parse(
+    JSON.stringify(
+      value || (
+        Array.isArray(value)
+          ? []
+          : {}
+      )
+    )
+  );
+}
+
+
+/*************************************************
+ * CACHE CONTROL
+ *************************************************/
+
+function clearShowStateOSCache() {
+  showStateClearFastCache_();
+
+  if (
+    typeof prepOSClearStateCache_ ===
+    "function"
+  ) {
+    prepOSClearStateCache_();
+  }
+
+  return true;
+}
+
+
+/*************************************************
+ * SPEED TEST
+ *************************************************/
+
+function testShowStateOSSpeed() {
+  clearShowStateOSCache();
+
+  const coldStartedAt =
+    Date.now();
+
+  const cold =
+    buildShowState();
+
+  const coldMs =
+    Date.now() -
+    coldStartedAt;
+
+  const warmStartedAt =
+    Date.now();
+
+  const warm =
+    buildShowState();
+
+  const warmMs =
+    Date.now() -
+    warmStartedAt;
+
+  const result = {
+    coldMs:
+      coldMs,
+
+    warmMs:
+      warmMs,
+
+    improvementMs:
+      coldMs -
+      warmMs,
+
+    performances:
+      cold &&
+      cold.performances
+        ? cold.performances.length
+        : 0,
+
+    assignmentTracks:
+      cold &&
+      cold.assignments &&
+      cold.assignments.tracks
+        ? cold.assignments.tracks.length
+        : 0,
+
+    plannedOuts:
+      cold &&
+      cold.intelligence &&
+      cold.intelligence.plannedOuts
+        ? cold.intelligence.plannedOuts.length
+        : 0,
+
+    warmStateAvailable:
+      Boolean(warm)
+  };
+
+  Logger.log(
+    "SHOW STATE SPEED TEST"
+  );
+
+  Logger.log(
+    JSON.stringify(
+      result,
+      null,
+      2
+    )
+  );
+
+  SpreadsheetApp
+    .getUi()
+    .alert(
+      "Show State speed test complete.\n\n" +
+      "Cold build: " +
+      result.coldMs +
+      " ms\n" +
+      "Warm build: " +
+      result.warmMs +
+      " ms\n" +
+      "Improvement: " +
+      result.improvementMs +
+      " ms\n\n" +
+      "Performances: " +
+      result.performances +
+      "\n" +
+      "Assignment tracks: " +
+      result.assignmentTracks +
+      "\n" +
+      "Planned outs: " +
+      result.plannedOuts
+    );
+
+  return result;
+}
+
+/*************************************************
+ * EXPORT POPUP + PDF
+ *************************************************/
+
+function showInOutExportDialog(data) {
+  data = data || {};
+
+  Logger.log("========== EXPORT DATA ==========");
+  Logger.log(JSON.stringify(data, null, 2));
+  Logger.log("================================");
+
+  const template =
+    HtmlService.createTemplateFromFile(
+      "11 InOutExportDialog"
+    );
+
+  template.dataJson =
+    JSON.stringify(data);
+
+  const html =
+    template
+      .evaluate()
+      .setWidth(440)
+      .setHeight(320);
+
+  SpreadsheetApp
+    .getUi()
+    .showModalDialog(
+      html,
+      "Export IN/OUT"
+    );
+}
+
+/**
+ * Legacy compatibility wrapper.
+ *
+ * Older Prep and Home code may still call this name.
+ * New PrepOS code should call showInOutExportDialog(data)
+ * directly.
+ */
+function showInOutExportFromDashboard(data) {
+  const exportData =
+    data ||
+    buildInOutExportDataFromSheet_();
+
+  return showInOutExportDialog(
+    exportData
+  );
+}
+
+
+/**
+ * Builds basic Export data when Export is launched
+ * independently from the Home dashboard.
+ */
+function buildInOutExportDataFromSheet_() {
+  const ss =
+    SpreadsheetApp.getActiveSpreadsheet();
+
+  const inOut =
+    ss.getSheetByName("IN/OUT");
+
+  if (!inOut) {
+    throw new Error(
+      'Could not find the "IN/OUT" sheet.'
+    );
+  }
+
+  return {
+    date:
+      inOut
+        .getRange("A3")
+        .getDisplayValue()
+        .trim(),
+
+    performance:
+      inOut
+        .getRange("B4")
+        .getDisplayValue()
+        .trim(),
+
+    guestSpellerName:
+      "",
+
+    guestDateTimeText:
+      "",
+
+    guestSpellerNote:
+      ""
+  };
+}
+
+
+function exportInOutPdfFromPrep(data) {
+  const ss = SpreadsheetApp.getActiveSpreadsheet();
+  const inOut = ss.getSheetByName("IN/OUT");
+
+  if (!inOut) throw new Error('Could not find "IN/OUT" tab.');
+
+  saveInOutSnapshotFromExport_(data);
+
+  prepPrepareInOutForExport_(inOut);
+
+  const folderId = getInOutFolderId_();
+  const folder = DriveApp.getFolderById(folderId);
+  const fileName = buildInOutPdfName_(data.date, data.performance);
+
+  const url =
+    "https://docs.google.com/spreadsheets/d/" + ss.getId() + "/export" +
+    "?format=pdf" +
+    "&gid=" + inOut.getSheetId() +
+    "&size=letter" +
+    "&portrait=false" +
+    "&fitw=true" +
+    "&sheetnames=false" +
+    "&printtitle=false" +
+    "&pagenumbers=false" +
+    "&gridlines=false" +
+    "&fzr=false" +
+    "&top_margin=0.25" +
+    "&bottom_margin=0.25" +
+    "&left_margin=0.25" +
+    "&right_margin=0.25";
+
+  const response = UrlFetchApp.fetch(url, {
+    headers: { Authorization: "Bearer " + ScriptApp.getOAuthToken() }
+  });
+
+  const file = folder.createFile(response.getBlob().setName(fileName));
+
+  return {
+    fileUrl: file.getUrl(),
+    downloadUrl: "https://drive.google.com/uc?export=download&id=" + file.getId(),
+    folderUrl: folder.getUrl(),
+    guestSpellerName: data.guestSpellerName || "",
+    guestDateTimeText: data.guestDateTimeText || ""
+  };
+}
+
+function prepPrepareInOutForExport_(inOut) {
+  if (!inOut) return;
+
+  const layout = PrepLayout().inOut;
+
+  // Keep staffing/signature area visible.
+  inOut.showRows(layout.staffingStartRow, layout.staffingNumRows);
+}
+
+function buildInOutPdfName_(dateText, performanceText) {
+  const date = parseInOutDate_(dateText);
+  const tz = Session.getScriptTimeZone();
+
+  const formattedDate = date
+    ? Utilities.formatDate(date, tz, "M.d.yy")
+    : String(dateText || "").replace(/\s+/g, ".");
+
+  const perf = String(performanceText || "").toUpperCase();
+
+  let suffix = "";
+  if (perf.includes("MAT")) suffix = " MAT";
+  if (perf.includes("EVE")) suffix = " EVE";
+
+  return "SPELLING BEE - IN_OUT " + formattedDate + suffix + ".pdf";
+}
+
+/*************************************************
+ * WEEKLY + PERFORMANCE HELPERS
+ *************************************************/
+
+function findPerformancesForWeeklyDay_(values, dayStart, dayEnd) {
+  const performances = [];
+  const seen = {};
+
+  const headerText = values[dayStart].slice(1, 5).join(" ");
+  const headerMatches = [...headerText.matchAll(/PERFORMANCE\s*#?\s*(\d+)\s*-\s*([^+\-]+)/gi)];
+
+  for (const match of headerMatches) {
+    const number = match[1];
+    const timeText = cleanPerformanceTime_(match[2]);
+
+    if (!seen[number]) {
+      performances.push({ number, time: timeText, row: null });
+      seen[number] = true;
+    }
+  }
+
+  for (let r = dayStart; r < dayEnd; r++) {
+    const rowText = values[r].slice(0, 5).join(" ");
+    const match = rowText.match(/PERFORMANCE\s*#?\s*(\d+)/i);
+
+    if (!match) continue;
+
+    const number = match[1];
+
+    if (seen[number]) {
+      const existing = performances.find(p => p.number === number);
+      if (existing) existing.row = r;
+      continue;
+    }
+
+    performances.push({
+      number,
+      time: findTimeNearPerformanceRow_(values, r),
+      row: r
+    });
+
+    seen[number] = true;
+  }
+
+  const count = performances.length;
+
+  performances.forEach(perf => {
+    perf.inOutText = buildInOutPerformanceText_(perf.number, perf.time, count);
+  });
+
+  return performances;
+}
+
+function buildInOutPerformanceText_(number, timeText, performanceCount) {
+  const normalizedTime = cleanPerformanceTime_(timeText);
+  const upper = normalizedTime.toUpperCase();
+
+  let suffix = "";
+
+  if (performanceCount > 1) {
+    if (upper.includes("MAT")) suffix = " MAT";
+    else if (upper.includes("EVE")) suffix = " EVE";
+    else if (upper.includes("2:") || upper.includes("1:")) suffix = " MAT";
+    else if (upper.includes("7:") || upper.includes("8:")) suffix = " EVE";
+  }
+
+  const timeOnly = normalizedTime
+    .replace(/\bMAT\b/gi, "")
+    .replace(/\bEVE\b/gi, "")
+    .trim();
+
+  return "PERFORMANCE #" + number + (timeOnly ? " - " + timeOnly : "") + suffix;
+}
+
+function findConductorForPerformanceFromWeekly_(values, dayStart, dayEnd, performanceNumber) {
+  for (let r = dayStart; r < dayEnd; r++) {
+    const rowText = values[r].slice(0, 5).join(" ");
+    const rowPerf = getPerformanceNumber_(rowText);
+
+    if (rowPerf && rowPerf === performanceNumber) {
+      for (let i = r + 1; i < Math.min(r + 8, dayEnd); i++) {
+        const line = String(values[i].slice(0, 5).join(" ")).trim();
+        const match = line.match(/Conductor\s*=\s*(.+)/i);
+        if (match) return match[1].trim();
+      }
+    }
+  }
+
+  return "";
+}
+
+function getNotesAndHolidayFromWeeklyDay_(values, dayStart, dayEnd) {
+  const output = [];
+
+  const holidayText = extractHolidayFromHeader_(
+    values[dayStart].slice(1, 5).join(" ").trim()
+  );
+
+  if (holidayText) output.push("- " + holidayText);
+
+  for (let r = dayStart; r < dayEnd; r++) {
+    const rowText = normalizeWeeklyText_(values[r].slice(0, 5).join(" "));
+
+    if (rowText.includes("NOTES")) {
+      const notesText = values[r]
+        .slice(0, 5)
+        .filter(cell => !normalizeWeeklyText_(cell).includes("NOTES"))
+        .join(" ")
+        .trim();
+
+      if (notesText) output.push(notesText);
+      break;
+    }
+  }
+
+  return output.join("\n");
+}
+
+/*************************************************
+ * EXPANDED CALENDAR CONDUCTOR LOOKUP
+ *
+ * Expanded Calendar:
+ * A = Date
+ * B = Performance
+ * F = Conductor
+ *
+ * Uses the same matching logic as Guest Speller.
+ *************************************************/
+
+function applyExpandedCalendarConductors_(
+  performances,
+  targetDate
+) {
+  const list = Array.isArray(performances)
+    ? performances
+    : [];
+
+  if (!list.length || !targetDate) {
+    return list;
+  }
+
+  const conductorMap =
+    getExpandedCalendarConductorMap_(
+      targetDate
+    );
+
+  list.forEach(function (perf) {
+    perf = perf || {};
+
+    const performanceNumber =
+      stageOSGuestPerformanceNumber_(
+        perf.inOutText ||
+        perf.performanceText ||
+        perf.label ||
+        perf.number ||
+        ""
+      );
+
+    const conductor =
+      conductorMap[performanceNumber] || "";
+
+    if (conductor) {
+      perf.conductor = conductor;
+      perf.conductorSource =
+        "Expanded Calendar";
+    } else {
+      /*
+       * Preserve the existing Weekly value only
+       * when Expanded Calendar has no match.
+       */
+      perf.conductor =
+        String(perf.conductor || "").trim();
+
+      perf.conductorSource =
+        perf.conductor
+          ? "Weekly Schedule"
+          : "";
+    }
+  });
+
+  return list;
+}
+
+
+/* =========================================================
+ * EXPANDED CALENDAR CONDUCTOR CACHE
+ * Version: 1.1.0
+ *
+ * Improvements:
+ * - Uses CacheService instead of Document Properties
+ * - Reads A:F in one Spreadsheet call
+ * - Caches each date for six hours
+ * ========================================================= */
+
+const EXPANDED_CALENDAR_CONDUCTOR_CACHE_PREFIX_ =
+  "EXPANDED_CALENDAR_CONDUCTORS_V2|";
+
+const EXPANDED_CALENDAR_CONDUCTOR_CACHE_SECONDS_ =
+  21600; // 6 hours
+
+
+function getExpandedCalendarConductorMap_(
+  targetDate,
+  forceRefresh
+) {
+  if (
+    !(targetDate instanceof Date) ||
+    isNaN(targetDate.getTime())
+  ) {
+    return {};
+  }
+
+  const timezone =
+    Session.getScriptTimeZone();
+
+  const dateKey =
+    Utilities.formatDate(
+      targetDate,
+      timezone,
+      "yyyy-MM-dd"
+    );
+
+  const cacheKey =
+    EXPANDED_CALENDAR_CONDUCTOR_CACHE_PREFIX_ +
+    dateKey;
+
+  if (!forceRefresh) {
+    const cached =
+      expandedCalendarReadConductorCache_(
+        cacheKey
+      );
+
+    if (cached) {
+      Logger.log(
+        "Expanded Calendar conductor source: cache"
+      );
+
+      return cached;
+    }
+  }
+
+  const startedAt =
+    Date.now();
+
+  const calendar =
+    SpreadsheetApp
+      .getActiveSpreadsheet()
+      .getSheetByName(
+        "Expanded Calendar"
+      );
+
+  if (!calendar) {
+    return {};
+  }
+
+  const lastRow =
+    calendar.getLastRow();
+
+  if (lastRow < 2) {
+    return {};
+  }
+
+  /*
+   * Read columns A:F once:
+   *
+   * A = Date
+   * B = Performance
+   * F = Conductor
+   */
+  const values =
+    calendar
+      .getRange(
+        2,
+        1,
+        lastRow - 1,
+        6
+      )
+      .getDisplayValues();
+
+  const wantedDateKey =
+    stageOSGuestDateKey_(
+      targetDate
+    );
+
+  const conductorMap = {};
+
+  let currentDateKey =
+    "";
+
+  for (
+    let index = 0;
+    index < values.length;
+    index++
+  ) {
+    const row =
+      values[index];
+
+    const displayedDate =
+      String(
+        row[0] || ""
+      ).trim();
+
+    if (displayedDate) {
+      currentDateKey =
+        stageOSGuestDateKey_(
+          displayedDate
+        );
+    }
+
+    if (
+      currentDateKey !==
+      wantedDateKey
+    ) {
+      continue;
+    }
+
+    const performanceNumber =
+      stageOSGuestPerformanceNumber_(
+        row[1]
+      );
+
+    const conductor =
+      String(
+        row[5] || ""
+      ).trim();
+
+    if (
+      performanceNumber &&
+      conductor
+    ) {
+      conductorMap[
+        performanceNumber
+      ] =
+        conductor;
+    }
+  }
+
+  expandedCalendarWriteConductorCache_(
+    cacheKey,
+    conductorMap
+  );
+
+  Logger.log(
+    "Expanded Calendar conductor source: rebuilt"
+  );
+
+  Logger.log(
+    "Expanded Calendar conductor lookup: " +
+    (
+      Date.now() -
+      startedAt
+    ) +
+    "ms"
+  );
+
+  return conductorMap;
+}
+
+
+function expandedCalendarReadConductorCache_(
+  cacheKey
+) {
+  try {
+    const raw =
+      CacheService
+        .getDocumentCache()
+        .get(
+          cacheKey
+        );
+
+    if (!raw) {
+      return null;
+    }
+
+    const parsed =
+      JSON.parse(
+        raw
+      );
+
+    if (
+      !parsed ||
+      typeof parsed.map !==
+        "object"
+    ) {
+      return null;
+    }
+
+    return parsed.map;
+
+  } catch (err) {
+    Logger.log(
+      "Expanded Calendar conductor cache read skipped: " +
+      String(err)
+    );
+
+    return null;
+  }
+}
+
+
+function expandedCalendarWriteConductorCache_(
+  cacheKey,
+  conductorMap
+) {
+  try {
+    CacheService
+      .getDocumentCache()
+      .put(
+        cacheKey,
+        JSON.stringify({
+          cachedAt:
+            new Date()
+              .toISOString(),
+
+          map:
+            conductorMap || {}
+        }),
+        EXPANDED_CALENDAR_CONDUCTOR_CACHE_SECONDS_
+      );
+
+    return true;
+
+  } catch (err) {
+    Logger.log(
+      "Expanded Calendar conductor cache write skipped: " +
+      String(err)
+    );
+
+    return false;
+  }
+}
+
+
+function clearExpandedCalendarConductorCache_(
+  targetDate
+) {
+  /*
+   * CacheService cannot enumerate every matching key,
+   * so a date is required for targeted clearing.
+   *
+   * The current production date is used when no date
+   * is explicitly supplied.
+   */
+  let date =
+    targetDate;
+
+  if (
+    !(date instanceof Date) ||
+    isNaN(date.getTime())
+  ) {
+    const inOut =
+      SpreadsheetApp
+        .getActiveSpreadsheet()
+        .getSheetByName(
+          "IN/OUT"
+        );
+
+    const dateText =
+      inOut
+        ? inOut
+            .getRange("A3")
+            .getDisplayValue()
+        : "";
+
+    date =
+      typeof prepOSParseDate_ ===
+        "function"
+        ? prepOSParseDate_(
+            dateText
+          )
+        : new Date(
+            dateText
+          );
+  }
+
+  if (
+    !(date instanceof Date) ||
+    isNaN(date.getTime())
+  ) {
+    return false;
+  }
+
+  const dateKey =
+    Utilities.formatDate(
+      date,
+      Session.getScriptTimeZone(),
+      "yyyy-MM-dd"
+    );
+
+  CacheService
+    .getDocumentCache()
+    .remove(
+      EXPANDED_CALENDAR_CONDUCTOR_CACHE_PREFIX_ +
+      dateKey
+    );
+
+  Logger.log(
+    "Expanded Calendar conductor cache cleared for " +
+    dateKey
+  );
+
+  return true;
+}
+
+
+function refreshExpandedCalendarConductorCache() {
+  const inOut =
+    SpreadsheetApp
+      .getActiveSpreadsheet()
+      .getSheetByName(
+        "IN/OUT"
+      );
+
+  if (!inOut) {
+    throw new Error(
+      'Could not find "IN/OUT" tab.'
+    );
+  }
+
+  const targetDate =
+    prepOSParseDate_(
+      inOut
+        .getRange("A3")
+        .getDisplayValue()
+    );
+
+  if (!targetDate) {
+    throw new Error(
+      "Could not read the current IN/OUT date."
+    );
+  }
+
+  clearExpandedCalendarConductorCache_(
+    targetDate
+  );
+
+  const map =
+    getExpandedCalendarConductorMap_(
+      targetDate,
+      true
+    );
+
+  SpreadsheetApp
+    .getUi()
+    .alert(
+      "Expanded Calendar conductor cache refreshed.\n\n" +
+      "Conductors found: " +
+      Object.keys(
+        map
+      ).length
+    );
+
+  return map;
+}
+
+
+function clearShowStateAndConductorCaches() {
+  clearExpandedCalendarConductorCache_();
+
+  if (
+    typeof clearPrepIntelligenceCache_ ===
+    "function"
+  ) {
+    clearPrepIntelligenceCache_();
+  }
+
+  if (
+    typeof clearShowStateOSCache ===
+    "function"
+  ) {
+    clearShowStateOSCache();
+  }
+
+  return true;
+}
+
+
+/*************************************************
+ * CAST OUTS
+ *************************************************/
+
+function getWeeklyCastOuts_(values, dayStart, dayEnd) {
+  const cache = CastListCacheOS().get();
+
+  const actors = cache.actors || [];
+  const principalByRole = cache.principalByRole || {};
+  const rolesByKey = cache.rolesByKey || {};
+
+  const outs = [];
+
+  for (let r = dayStart; r < dayEnd; r++) {
+    const rowText = values[r].join("\n").replace(/\t/g, " ").trim();
+    if (!rowText.toUpperCase().includes("OUT")) continue;
+
+    rowText.split(/\n+/).forEach(line => {
+      const match = line.trim().match(/(.+?)\s+OUT\s*,\s*(.+?)\s*=\s*(.+)/i);
+      if (!match) return;
+
+      const role = matchRoleFromCastList_(clean_(match[2]), rolesByKey);
+
+      outs.push({
+        out: principalByRole[cleanKey_(role)] || matchActorNameFromCastList_(match[1], actors),
+        in: matchActorNameFromCastList_(match[3], actors),
+        role: role,
+        reason: ""
+      });
+    });
+  }
+
+  return dedupeCastOutRows_(outs);
+}
+
+function getInOutDropdowns_() {
+  const cache = CastListCacheOS().get();
+
+  return {
+    out: cache.actors || [],
+    in: cache.actors || [],
+    role: cache.roles || [],
+    reason: ["Approved PD", "Unapp PD", "Illness", "Injury", "MLOA", "Vacation", "Conditional"]
+  };
+}
+
+function continueAfterInOutExport() {
+  const cached = getGuestSpellerCache_();
+
+  if (cached.guestSpellerName) {
+    showGuestSpellerDialog(cached);
+  }
+}
+
+function prepInOutButtonV2() {
+  const showState = buildShowState();
+  if (!showState) return;
+
+  const template = HtmlService.createTemplateFromFile("11 InOutPrepDialogV2");
+  template.dataJson = JSON.stringify(showState);
+
+  const html = template.evaluate()
+    .setWidth(820)
+    .setHeight(860);
+
+  SpreadsheetApp.getUi().showModalDialog(html, "Prep IN/OUT");
+}
+
+function TEST_homeDateMismatch() {
+  const ss = SpreadsheetApp.getActiveSpreadsheet();
+  const inOut = ss.getSheetByName("IN/OUT");
+
+  Logger.log("IN/OUT!A3 display: " + inOut.getRange("A3").getDisplayValue());
+
+  const showState = buildShowState();
+
+  Logger.log("showState.date: " + showState.date);
+  Logger.log("showState.prettyDate: " + showState.prettyDate);
+  Logger.log("weeklyName: " + showState.weeklyName);
+  Logger.log("performances: " + JSON.stringify(showState.performances, null, 2));
+}
+
+function TEST_conductorMapNow() {
+  const ss = SpreadsheetApp.getActive();
+  const inOut = ss.getSheetByName("IN/OUT");
+
+  const dateText = inOut.getRange("A3").getDisplayValue();
+  const targetDate = parseInOutDate_(dateText);
+
+  Logger.log(
+    JSON.stringify(
+      getExpandedCalendarConductorMap_(targetDate),
+      null,
+      2
+    )
+  );
+}

@@ -1,0 +1,38 @@
+<!DOCTYPE html>
+<html>
+  <head>
+    <base target="_top">
+    <?!= prepOSInclude_("PrepStyles"); ?>
+  </head>
+
+  <body>
+    <div id="app">
+
+      <header class="topbar prep-hero">
+
+        <button class="secondary prep-reload" onclick="loadPrepOS()">
+          Reload
+        </button>
+
+        <div class="prep-hero-performance" id="topSummaryPerformance">
+          Loading...
+        </div>
+
+        <div class="prep-hero-date" id="topSummaryDate"></div>
+
+        <div class="prep-hero-conductor" id="topSummaryConductor"></div>
+
+        <div class="prep-hero-meta" id="topSummaryMeta"></div>
+
+      </header>
+
+      <main id="content">
+        <div class="loading">Loading PrepOS…</div>
+      </main>
+
+    </div>
+
+    <?!= prepOSInclude_("PrepScripts"); ?>
+
+  </body>
+</html>

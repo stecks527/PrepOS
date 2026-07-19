@@ -4,13 +4,7 @@
   let plannedOuts = [];
   let callIns = [];
   let assignments = {};
-  let performanceAssignments = {};
-  let currentPerformanceKey = "";
-  let selectedGuestInfo = {
-    name: "",
-    dateTimeText: "",
-    note: ""
-  };
+  let selectedGuestInfo = { name: "", dateTimeText: "", note: "" };
   let baseNotes = "";
 
   document.addEventListener("DOMContentLoaded", loadPrepOS);
@@ -42,11 +36,6 @@
       .map(normalizeClientOut_);
     callIns = [];
 
-    performanceAssignments =
-      cloneClientObject_(
-        data.performanceAssignments || {}
-      );
-
     assignments = data.assignments || {
       tracks: [],
       values: {},
@@ -58,30 +47,6 @@
     assignments.values = assignments.values || {};
     assignments.dropdowns = assignments.dropdowns || { peopleByTrack: {} };
     assignments.training = assignments.training || {};
-
-    /*
-     * Office Show remains a boolean for compatibility with
-     * existing writers, snapshots, and PayrollOS.
-     *
-     * officeShowPerson stores the selected person.
-     */
-    if (
-      assignments.officeShow &&
-      typeof assignments.officeShow === "object"
-    ) {
-      assignments.officeShowPerson =
-        assignments.officeShow.person || "";
-
-      assignments.officeShow =
-        assignments.officeShow.enabled === true;
-    }
-
-    assignments.officeShow =
-      assignments.officeShow === true;
-
-    assignments.officeShowPerson =
-      assignments.officeShowPerson || "";
-
 
     ["stageManagement", "audio"].forEach(function (groupId) {
       assignments.training[groupId] =
@@ -146,28 +111,21 @@
     return `
       <section class="section">
         <h2>Stage Management</h2>
-
         <div id="stageManagementAssignments"></div>
 
-        <div class="prep-expandable-control">
-          <div class="checkline prep-feature-toggle">
-            <input type="checkbox" id="stageManagementTrainingEnabled"
-              onchange="renderTraining_('stageManagement')">
-            <label for="stageManagementTrainingEnabled">TRAINING</label>
-          </div>
-          <div id="stageManagementTrainingContainer"
-            class="prep-expanded-panel"></div>
+        <div class="checkline">
+          <input type="checkbox" id="officeShowEnabled"
+            onchange="assignments.officeShow = this.checked">
+          <label>Office Show</label>
         </div>
 
-        <div class="prep-expandable-control">
-          <div class="checkline prep-feature-toggle">
-            <input type="checkbox" id="officeShowEnabled"
-              onchange="toggleOfficeShow_()">
-            <label for="officeShowEnabled">OFFICE SHOW</label>
-          </div>
-          <div id="officeShowContainer"
-            class="prep-expanded-panel"></div>
+        <h3>Training</h3>
+        <div class="checkline">
+          <input type="checkbox" id="stageManagementTrainingEnabled"
+            onchange="renderTraining_('stageManagement')">
+          <label>Training occurring</label>
         </div>
+        <div id="stageManagementTrainingContainer"></div>
       </section>
     `;
   }
@@ -179,15 +137,12 @@
         <div id="musicAssignments"></div>
         <div id="audioAssignments"></div>
 
-        <div class="prep-expandable-control">
-          <div class="checkline prep-feature-toggle">
-            <input type="checkbox" id="audioTrainingEnabled"
-              onchange="renderTraining_('audio')">
-            <label for="audioTrainingEnabled">TRAINING</label>
-          </div>
-          <div id="audioTrainingContainer"
-            class="prep-expanded-panel"></div>
+        <div class="checkline">
+          <input type="checkbox" id="audioTrainingEnabled"
+            onchange="renderTraining_('audio')">
+          <label>Audio training occurring</label>
         </div>
+        <div id="audioTrainingContainer"></div>
       </section>
     `;
   }
@@ -221,111 +176,29 @@
   }
 
   function selectPerformance_(index) {
-  /*
-   * Preserve unsaved edits made to the performance
-   * that is currently on screen.
-   */
-  saveCurrentPerformanceAssignments_();
+    selectedIndex = Math.max(0, index || 0);
+    const perf = (data.performances || [])[selectedIndex] || {};
 
-  selectedIndex =
-    Math.max(
-      0,
-      Number(index || 0)
-    );
+    assignments.values.conductor = perf.conductor || assignments.values.conductor || "";
 
-  const perf =
-    (data.performances || [])[
-      selectedIndex
-    ] || {};
+    selectedGuestInfo = {
+      name: perf.guestSpeller || "",
+      dateTimeText: perf.guestDateTimeText || "",
+      note: perf.guestNote || ""
+    };
 
-  const performanceLabel =
-    perf.inOutText ||
-    perf.performance ||
-    perf.label ||
-    "";
+    renderPerformanceButtons_();
+    renderAssignments_();
 
-  currentPerformanceKey =
-    performanceAssignmentKey_(
-      performanceLabel
-    );
-
-  const performanceState =
-    performanceAssignments[
-      currentPerformanceKey
-    ] || buildDefaultPerformanceAssignments_(
-      perf
-    );
-
-  performanceAssignments[
-    currentPerformanceKey
-  ] =
-    cloneClientObject_(
-      performanceState
-    );
-
-  /*
-   * Replace the assignment values. Do not merge them into
-   * the previously selected performance's values.
-   */
-  assignments.values =
-    Object.assign(
-      {},
-      performanceState.values || {}
-    );
-
-  assignments.values.conductor =
-    perf.conductor ||
-    assignments.values.conductor ||
-    "";
-
-  assignments.officeShow =
-    performanceState.officeShow ===
-    true;
-
-  assignments.officeShowPerson =
-    performanceState.officeShowPerson ||
-    "";
-
-  assignments.training =
-    normalizePerformanceTraining_(
-      cloneClientObject_(
-        performanceState.training || {}
-      )
-    );
-
-  selectedGuestInfo = {
-    name:
-      perf.guestSpeller || "",
-
-    dateTimeText:
-      perf.guestDateTimeText || "",
-
-    note:
-      perf.guestNote || ""
-  };
-
-  renderPerformanceButtons_();
-  renderAssignments_();
-
-  const notes =
-    document.getElementById(
-      "notesInput"
-    );
-
-  if (notes) {
-    notes.value =
-      selectedGuestInfo.note
-        ? [
-            selectedGuestInfo.note,
-            baseNotes
-          ]
-            .filter(Boolean)
-            .join("\n")
+    const notes = document.getElementById("notesInput");
+    if (notes) {
+      notes.value = selectedGuestInfo.note
+        ? [selectedGuestInfo.note, baseNotes].filter(Boolean).join("\n")
         : baseNotes;
-  }
+    }
 
-  refreshHero_();
-}
+    refreshHero_();
+  }
 
   function renderAssignments_() {
     renderAssignmentGroup_("stageManagement", "stageManagementAssignments");
@@ -334,7 +207,6 @@
 
     const office = document.getElementById("officeShowEnabled");
     if (office) office.checked = assignments.officeShow === true;
-    renderOfficeShow_();
 
     ["stageManagement", "audio"].forEach(function (groupId) {
       const checkbox = document.getElementById(groupId + "TrainingEnabled");
@@ -343,203 +215,6 @@
 
       renderTraining_(groupId);
     });
-  }
-
-  function saveCurrentPerformanceAssignments_() {
-  if (!currentPerformanceKey) {
-    return;
-  }
-
-  performanceAssignments[
-    currentPerformanceKey
-  ] = {
-    performance:
-      (
-        (data.performances || [])[
-          selectedIndex
-        ] || {}
-      ).inOutText || "",
-
-    source:
-      "PrepDialog",
-
-    values:
-      Object.assign(
-        {},
-        assignments.values || {}
-      ),
-
-    officeShow:
-      assignments.officeShow ===
-      true,
-
-    officeShowPerson:
-      assignments.officeShowPerson ||
-      "",
-
-    training:
-      cloneClientObject_(
-        assignments.training || {}
-      )
-  };
-}
-
-
-function buildDefaultPerformanceAssignments_(
-  performance
-) {
-  performance =
-    performance || {};
-
-  const values =
-    Object.assign(
-      {},
-      (
-        data.assignments &&
-        data.assignments.values
-          ? data.assignments.values
-          : {}
-      )
-    );
-
-  values.conductor =
-    performance.conductor ||
-    values.conductor ||
-    "";
-
-  return {
-    performance:
-      performance.inOutText ||
-      performance.performance ||
-      performance.label ||
-      "",
-
-    source:
-      "AssignmentOS",
-
-    values:
-      values,
-
-    officeShow:
-      false,
-
-    officeShowPerson:
-      "",
-
-    training:
-      normalizePerformanceTraining_(
-        {}
-      )
-  };
-}
-
-
-function normalizePerformanceTraining_(
-  training
-) {
-  training =
-    training || {};
-
-  ["stageManagement", "audio"]
-    .forEach(function (groupId) {
-      training[groupId] =
-        training[groupId] || {
-          enabled: false,
-          trackId: "",
-          trainer: "",
-          trainee: "",
-          note: "",
-          mode: "Training"
-        };
-    });
-
-  return training;
-}
-
-
-function performanceAssignmentKey_(
-  value
-) {
-  return String(
-    value || ""
-  )
-    .toUpperCase()
-    .replace(/\s+/g, " ")
-    .trim();
-}
-
-
-function cloneClientObject_(
-  value
-) {
-  return JSON.parse(
-    JSON.stringify(
-      value || {}
-    )
-  );
-}
-
-  /* =========================================================
-   * OFFICE SHOW
-   * ========================================================= */
-
-  function toggleOfficeShow_() {
-    const checkbox = document.getElementById("officeShowEnabled");
-    assignments.officeShow = Boolean(checkbox && checkbox.checked);
-    if (!assignments.officeShow) assignments.officeShowPerson = "";
-    renderOfficeShow_();
-  }
-
-  function renderOfficeShow_() {
-    const container = document.getElementById("officeShowContainer");
-    if (!container) return;
-
-    if (assignments.officeShow !== true) {
-      container.innerHTML = "";
-      container.style.display = "none";
-      return;
-    }
-
-    container.style.display = "block";
-    const people = getOfficeShowPeople_();
-    const selected = assignments.officeShowPerson || "";
-
-    container.innerHTML = `
-      <div class="label">Person Taking Office Show</div>
-      <select onchange="officeShowPersonChanged_(this.value)">
-        <option value=""></option>
-        ${people.map(function (name) {
-          return `<option value="${escapeAttr_(name)}"
-            ${name === selected ? "selected" : ""}>${escapeHtml_(name)}</option>`;
-        }).join("")}
-      </select>
-    `;
-  }
-
-  function officeShowPersonChanged_(value) {
-    assignments.officeShowPerson = value || "";
-  }
-
-  function getOfficeShowPeople_() {
-    const people = [];
-    (assignments.tracks || [])
-      .filter(function (track) {
-        return track.departmentGroup === "stageManagement";
-      })
-      .forEach(function (track) {
-        ((((assignments.dropdowns || {}).peopleByTrack || {})[track.id] || []))
-          .forEach(function (person) {
-            const name = person && person.name ? person.name : person;
-            if (name && people.indexOf(name) === -1) people.push(name);
-          });
-      });
-
-    if (assignments.officeShowPerson &&
-        people.indexOf(assignments.officeShowPerson) === -1) {
-      people.push(assignments.officeShowPerson);
-    }
-
-    return people.sort();
   }
 
   function renderAssignmentGroup_(groupId, containerId) {
@@ -628,17 +303,15 @@ function cloneClientObject_(
 
     if (!training.enabled) {
       container.innerHTML = "";
-      container.style.display = "none";
       return;
     }
-
-    container.style.display = "block";
 
     const tracks = (assignments.tracks || []).filter(function (track) {
       return track.departmentGroup === groupId;
     });
 
     const names = [];
+
     tracks.forEach(function (track) {
       ((((assignments.dropdowns || {}).peopleByTrack || {})[track.id] || []))
         .forEach(function (person) {
@@ -648,36 +321,26 @@ function cloneClientObject_(
     });
 
     container.innerHTML = `
-      <div class="prep-expanded-grid">
-        <div>
-          <div class="label">Track</div>
-          <select onchange="trainingTrackChanged_('${escapeAttr_(groupId)}', this.value)">
-            <option value=""></option>
-            ${tracks.map(function (track) {
-              return `<option value="${escapeAttr_(track.id)}"
-                ${track.id === training.trackId ? "selected" : ""}>
-                ${escapeHtml_(track.label)}
-              </option>`;
-            }).join("")}
-          </select>
-        </div>
+      <div class="label">Track</div>
+      <select onchange="trainingTrackChanged_('${groupId}', this.value)">
+        <option value=""></option>
+        ${tracks.map(function (track) {
+          return `<option value="${escapeAttr_(track.id)}"
+            ${track.id === training.trackId ? "selected" : ""}>
+            ${escapeHtml_(track.label)}
+          </option>`;
+        }).join("")}
+      </select>
 
-        <div>
-          <div class="label">Trainer</div>
-          ${trainingPersonDropdown_(groupId, "trainer", names)}
-        </div>
+      <div class="label" style="margin-top:10px;">Trainer</div>
+      ${trainingPersonDropdown_(groupId, "trainer", names)}
 
-        <div>
-          <div class="label">Trainee</div>
-          ${trainingPersonDropdown_(groupId, "trainee", names)}
-        </div>
+      <div class="label" style="margin-top:10px;">Trainee</div>
+      ${trainingPersonDropdown_(groupId, "trainee", names)}
 
-        <div>
-          <div class="label">Training Note</div>
-          <input value="${escapeAttr_(training.note || "")}"
-            oninput="assignments.training['${escapeAttr_(groupId)}'].note = this.value">
-        </div>
-      </div>
+      <div class="label" style="margin-top:10px;">Training Note</div>
+      <input value="${escapeAttr_(training.note || "")}"
+        oninput="assignments.training['${groupId}'].note = this.value">
     `;
   }
 
@@ -926,12 +589,18 @@ function cloneClientObject_(
   }
 
   function applyPrep() {
-  saveCurrentPerformanceAssignments_();
   const perf =
     (data.performances || [])[selectedIndex] || {};
 
   const status =
     document.getElementById("status");
+
+  if (!status) {
+    console.error(
+      'PrepOS could not find the element with id="status".'
+    );
+    return;
+  }
 
   const payload = {
     date:
@@ -941,6 +610,7 @@ function cloneClientObject_(
 
     performance:
       perf.inOutText ||
+      document.getElementById("performanceInput")?.value ||
       "",
 
     conductor:
@@ -949,12 +619,14 @@ function cloneClientObject_(
       "",
 
     notes:
-      document.getElementById("notesInput").value ||
+      document.getElementById("notesInput")?.value ||
       "",
 
     castOuts:
       collectOuts_(plannedOuts)
-        .concat(collectOuts_(callIns)),
+        .concat(
+          collectOuts_(callIns)
+        ),
 
     assignments:
       assignments,
@@ -972,10 +644,21 @@ function cloneClientObject_(
       ""
   };
 
-  status.textContent = "Applying...";
+  status.textContent =
+    "Applying Prep…";
+
+  console.log(
+    "PrepOS payload:",
+    payload
+  );
 
   google.script.run
     .withSuccessHandler(function (result) {
+      console.log(
+        "PrepOS apply result:",
+        result
+      );
+
       if (
         !result ||
         result.success === false ||
@@ -991,51 +674,77 @@ function cloneClientObject_(
 
       status.textContent =
         result.message ||
-        "IN/OUT updated. Opening Export...";
+        "IN/OUT updated. Opening Export…";
 
       const exportData =
-        result.nextData || {
-          date: payload.date,
-          performance: payload.performance,
+        result.nextData ||
+        {
+          date:
+            payload.date,
+
+          performance:
+            payload.performance,
+
           guestSpellerName:
             payload.guestSpellerName,
+
           guestDateTimeText:
             payload.guestDateTimeText,
+
           guestSpellerNote:
             payload.guestSpellerNote
         };
 
+      /*
+       * Important:
+       * Do not call google.script.host.close() here.
+       *
+       * Showing the Export modal replaces the current
+       * Prep modal. Closing the host afterward can close
+       * the newly opened Export dialog as well.
+       */
       google.script.run
         .withSuccessHandler(function () {
           console.log(
-            "Export dialog opened."
+            "Export dialog opened successfully."
           );
         })
         .withFailureHandler(function (error) {
+          console.error(
+            "Export dialog failed:",
+            error
+          );
+
           status.textContent =
-            "IN/OUT was updated, but Export could not open: " +
+            "IN/OUT was updated, but the Export dialog " +
+            "could not open: " +
             (
               error && error.message
                 ? error.message
                 : String(error)
             );
-
-          console.error(error);
         })
-        .showInOutExportDialog(exportData);
+        .showInOutExportDialog(
+          exportData
+        );
     })
     .withFailureHandler(function (error) {
+      console.error(
+        "PrepOS apply failed:",
+        error
+      );
+
       status.textContent =
-        "Error: " +
+        "Prep failed: " +
         (
           error && error.message
             ? error.message
             : String(error)
         );
-
-      console.error(error);
     })
-    .prepOS_applyPayload(payload);
+    .prepOS_applyPayload(
+      payload
+    );
 }
 
   function refreshHero_() {
